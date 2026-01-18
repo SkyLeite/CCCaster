@@ -3,6 +3,7 @@
 #include "ConsoleUi.hpp"
 #include "Socket.hpp"
 #include "Timer.hpp"
+#include <steam_api.h>
 
 #define DEFAULT_GET_TIMEOUT ( 5000 )
 
@@ -17,6 +18,7 @@ enum LobbyMode
     MENU,
     CONCERTO_BROWSE,
     CONCERTO_LOBBY,
+    STEAM_LOBBY,
     DEFAULT_LOBBY,
 };
 
@@ -52,6 +54,7 @@ public:
     void accept();
     void end();
     void fetchPublicLobby();
+    void fetchSteamLobby();
     bool checkLobbyCode( std::string code );
 
     void init( Owner* owner );
@@ -71,6 +74,9 @@ public:
     std::string lobbyError;
     std::string lobbyMsg;
 
+    std::vector<std::string> steamlobbyentries;
+
+    void OnLobbyMatchList(LobbyMatchList_t *pLobbyMatchList, bool bIOFailure);
 
 private:
     SocketPtr _socket;
@@ -102,4 +108,6 @@ private:
     // Thread
     void run() override;
 
+    // Steam callbacks
+    CCallResult<Lobby, LobbyMatchList_t> m_CallResultLobbyMatchList;
 };

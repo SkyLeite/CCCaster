@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <mmsystem.h>
 #include <wininet.h>
+#include <steam/steam_api.h>
 
 using namespace std;
 
@@ -237,7 +238,7 @@ void MainUi::lobby( RunFuncPtr run )
         }
 
         if ( _lobby->mode == MENU ) {
-            if ( mode < 0 || mode >= 4 ) {
+            if ( mode < 0 || mode >= 5 ) {
                 break;
             } else if ( mode == 0 ) {
                 _lobby->mode = CONCERTO_BROWSE;
@@ -287,6 +288,22 @@ void MainUi::lobby( RunFuncPtr run )
                 }
             } else if ( mode == 3 ) {
                 _lobby->mode = DEFAULT_LOBBY;
+            } else if ( mode == 4 ) {
+                _lobby->mode = STEAM_LOBBY;
+                _lobby->fetchSteamLobby();
+                display ( "Fetching steam lobbies..." );
+
+                // Wait for lobbies to be populated
+                uiCondVar.wait(_lobby->entryMutex);
+                // while(true) {
+                //     if (_lobby->steamlobbyentries.size() > 0) {
+                //         LOG("Got lobbies!");
+                //         break;
+                //     }
+                // }
+
+                LOG("Fetched lobbies");
+                _ui->pop();
             }
         } else if ( _lobby->mode == CONCERTO_BROWSE ) {
             if ( mode < 0 || mode >= numEntries ) {

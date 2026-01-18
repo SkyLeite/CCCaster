@@ -89,7 +89,7 @@ DEFINES += -DRELAY_LIST='"$(RELAY_LIST)"' -DTAG='"$(TAG)"'
 DEFINES += -DLOBBY_LIST='"$(LOBBY_LIST)"'
 INCLUDES = -I$(CURDIR) -I$(CURDIR)/netplay -I$(CURDIR)/lib -I$(CURDIR)/tests -I$(CURDIR)/3rdparty -I$(CURDIR)/sequences
 INCLUDES += -I$(CURDIR)/3rdparty/cereal/include -I$(CURDIR)/3rdparty/gtest/include -I$(CURDIR)/3rdparty/minhook/include
-INCLUDES += -I$(CURDIR)/3rdparty/d3dhook -I$(CURDIR)/3rdparty/framedisplay -I$(CURDIR)/3rdparty/imgui -I$(CURDIR)/3rdparty/imgui/backends
+INCLUDES += -I$(CURDIR)/3rdparty/d3dhook -I$(CURDIR)/3rdparty/framedisplay -I$(CURDIR)/3rdparty/imgui -I$(CURDIR)/3rdparty/imgui/backends -I$(CURDIR)/3rdparty/steam
 CC_FLAGS = -m32 $(INCLUDES) $(DEFINES)
 #	https://gcc.gnu.org/onlinedocs/gcc/x86-Options.html
 # 	Intel Celeron 440 is listed as minimum CPU for melty on steam
@@ -97,6 +97,7 @@ CC_FLAGS += -mmmx -msse -msse2 -msse3 -mssse3
 
 # Linker flags
 LD_FLAGS = -m32 -static -lws2_32 -lpsapi -lwinpthread -lwinmm -lole32 -ldinput -lwininet -ldwmapi -lgdi32
+LD_FLAGS += -L$(CURDIR)/3rdparty/steam/redist -lsteam_api
 
 # Build options
 # DEFINES += -DDISABLE_LOGGING

@@ -5,12 +5,14 @@
 #include "StringUtils.hpp"
 #include "ConsoleUi.hpp"
 #include "Version.hpp"
+#include "Steam.hpp"
 
 #include <optionparser.h>
 #include <windows.h>
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <steam_api.h>
 
 using namespace std;
 using namespace option;
@@ -120,6 +122,7 @@ static bool initDirsAndSanityCheck ( bool checkGameExe = true )
         if ( val == INVALID_FILE_ATTRIBUTES )
         {
             lastError += "\nCouldn't find " MBAA_EXE "!";
+            lastError += format("\nPath: %s", ProcessManager::gameDir);
             success = false;
         }
     }
@@ -191,6 +194,10 @@ static IpAddrPort tryParseIpAddrPort ( const string& str )
     return address;
 }
 
+void runSteamCallbacks() {
+    LOG("Running callbacks");
+    SteamAPI_RunCallbacks();
+}
 
 int main ( int argc, char *argv[] )
 {
@@ -221,6 +228,13 @@ int main ( int argc, char *argv[] )
     Logger::get().deinitialize();
     return 0;
 #endif
+
+    if (!SteamAPI_Init()) {
+        PRINT ( "Failed to initialize Steam API" );
+        PRINT ( "Press any key to exit." );
+        system ( "@pause > nul" );
+        return -1;
+    }
 
     static const Descriptor desc[] =
     {
@@ -412,6 +426,15 @@ int main ( int argc, char *argv[] )
             LOG ( "%s", Options ( ( Options::Enum ) i ) );
         if ( opt[i].arg )
             LOG ( "arg='%s'", opt[i].arg );
+    }
+
+    // Initialize Steam
+    steamThread.start();
+
+    if (steamThread.isRunning()) {
+        LOG("Running");
+    } else {
+        LOG("NOT RUNNING! D:");
     }
 
 #ifndef RELEASE
