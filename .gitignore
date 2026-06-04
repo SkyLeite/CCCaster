@@ -27,3 +27,9 @@ TAGS
 *.png
 scripts/seqlists*
 debugging
+CLAUDE.local.md
+steam_api*.dll
+steam_appid.txt
+spike/
+scripts/.recipe-shell.sh
+.env

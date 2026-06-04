@@ -6,6 +6,10 @@
 #include "ChangeMonitor.hpp"
 #include "SmartSocket.hpp"
 #include "UdpSocket.hpp"
+#ifdef ENABLE_STEAM
+#include "SteamSocket.hpp"
+#include "SteamManager.hpp"
+#endif
 #include "Exceptions.hpp"
 #include "Enum.hpp"
 #include "ErrorStringsExt.hpp"
@@ -1823,20 +1827,47 @@ struct DllMain
 
                     netMan.setRemotePlayer ( remotePlayer );
 
+#ifdef ENABLE_STEAM
+                    // Launcher shut down its Steam instance before spawning the game; bring
+                    // Steam up in-process so we can re-establish the P2P connection by SteamID.
+                    if ( clientMode.isSteam() )
+                        SteamManager::get().ref();
+#endif
+
                     if ( clientMode.isHost() )
                     {
-                        serverCtrlSocket = SmartSocket::listenTCP ( this, address.port );
-                        LOG ( "serverCtrlSocket=%08x", serverCtrlSocket.get() );
+#ifdef ENABLE_STEAM
+                        if ( clientMode.isSteam() )
+                        {
+                            serverCtrlSocket = SteamSocket::listen ( this, STEAM_CTRL_VPORT );
+                            serverDataSocket = SteamSocket::listen ( this, STEAM_DATA_VPORT );
+                        }
+                        else
+#endif
+                        {
+                            serverCtrlSocket = SmartSocket::listenTCP ( this, address.port );
+                            serverDataSocket = SmartSocket::listenUDP ( this, address.port );
+                        }
 
-                        serverDataSocket = SmartSocket::listenUDP ( this, address.port );
+                        LOG ( "serverCtrlSocket=%08x", serverCtrlSocket.get() );
                         LOG ( "serverDataSocket=%08x", serverDataSocket.get() );
                     }
                     else if ( clientMode.isClient() )
                     {
-                        serverCtrlSocket = SmartSocket::listenTCP ( this, 0 );
-                        LOG ( "serverCtrlSocket=%08x", serverCtrlSocket.get() );
+#ifdef ENABLE_STEAM
+                        if ( clientMode.isSteam() )
+                        {
+                            serverCtrlSocket = SteamSocket::listen ( this, STEAM_CTRL_VPORT );
+                            dataSocket = SteamSocket::connect ( this, steamIdFromAddr ( address ), STEAM_DATA_VPORT );
+                        }
+                        else
+#endif
+                        {
+                            serverCtrlSocket = SmartSocket::listenTCP ( this, 0 );
+                            dataSocket = SmartSocket::connectUDP ( this, address, clientMode.isUdpTunnel() );
+                        }
 
-                        dataSocket = SmartSocket::connectUDP ( this, address, clientMode.isUdpTunnel() );
+                        LOG ( "serverCtrlSocket=%08x", serverCtrlSocket.get() );
                         LOG ( "dataSocket=%08x", dataSocket.get() );
                     }
 

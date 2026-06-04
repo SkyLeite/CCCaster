@@ -7,6 +7,11 @@
 #include "CharacterSelect.hpp"
 #include "StringUtils.hpp"
 #include "NetplayStates.hpp"
+#include "EventManager.hpp"
+#ifdef ENABLE_STEAM
+#include "SteamManager.hpp"
+#include "SteamSocket.hpp"
+#endif
 
 #include <algorithm>
 #include <iomanip>
@@ -121,6 +126,119 @@ void MainUi::netplay ( RunFuncPtr run )
     }
 
     _ui->pop();
+}
+
+void MainUi::steam ( RunFuncPtr run )
+{
+#ifndef ENABLE_STEAM
+    _ui->pushRight ( new ConsoleUi::TextBox ( "This build was compiled without Steam support." ), { 1, 0 } );
+    _ui->popUntilUserInput();
+    _ui->pop();
+#else
+    _ui->pushRight ( new ConsoleUi::Menu ( "Steam", { "Host (create code)", "Join (enter code)" }, "Cancel" ) );
+    const int choice = _ui->popUntilUserInput ( true )->resultInt;
+    _ui->pop();
+
+    if ( choice < 0 || choice > 1 )
+        return;
+
+    // AutoManager (managers initialized) BEFORE ref(), so the pump timer created inside
+    // ref() lives in an initialized TimerManager.
+    AutoManager _;
+
+    if ( ! SteamManager::get().ref() )
+    {
+        _ui->pushBelow ( new ConsoleUi::TextBox (
+                             "Could not initialize Steam.\n"
+                             "Is Steam running, and do you own Melty Blood on this account?" ), { 1, 0 } );
+        _ui->popUntilUserInput();
+        _ui->pop();
+        return;
+    }
+
+    // The lobby is async. There is no EventManager loop running in the menu, so pump
+    // SteamManager directly (manual dispatch needs no event loop) until it resolves.
+    // ~5s timeout (500 * 10ms). The in-game session pumps via the timer once MainApp runs
+    // the EventManager loop.
+    auto pumpUntilDone = [] ()
+    {
+        for ( int i = 0; i < 500 && SteamManager::get().lobbyState() == SteamManager::LobbyState::Working; ++i )
+        {
+            SteamManager::get().pump();
+            Sleep ( 10 );
+        }
+    };
+
+    bool proceed = false;
+
+    if ( choice == 0 ) // Host
+    {
+        SteamManager::get().hostLobby();
+        display ( "Creating Steam lobby..." );
+        pumpUntilDone();
+
+        if ( SteamManager::get().lobbyState() == SteamManager::LobbyState::Ready )
+        {
+            if ( gameMode ( true ) )
+            {
+                initialConfig.mode.value = ClientMode::Host;
+                initialConfig.mode.flags |= ClientMode::IsSteam;
+                _address = IpAddrPort ( steamAddr ( SteamManager::get().getSteamID() ), ( uint16_t ) 0 );
+                display ( "Steam join code: " + SteamManager::get().lobbyCode()
+                          + "\n\nWaiting for opponent to join..." );
+                proceed = true;
+            }
+            // else: user cancelled mode select -> just back out, no error.
+        }
+        else
+        {
+            sessionError = "Failed to create Steam lobby";
+        }
+    }
+    else // Join
+    {
+        ConsoleUi::Prompt *menu = new ConsoleUi::Prompt ( ConsoleUi::Prompt::String, "Enter Steam join code:" );
+        _ui->pushRight ( menu, { 1, 0 } ); // Expand width
+        _ui->popUntilUserInput();
+        const string code = trimmed ( menu->resultStr );
+        _ui->pop();
+
+        if ( ! code.empty() )
+        {
+            SteamManager::get().joinLobbyByCode ( code );
+            display ( "Searching for Steam lobby '" + code + "'..." );
+            pumpUntilDone();
+
+            if ( SteamManager::get().lobbyState() == SteamManager::LobbyState::Ready )
+            {
+                initialConfig.mode.value = ClientMode::Client;
+                initialConfig.mode.flags |= ClientMode::IsSteam;
+                _address = IpAddrPort ( steamAddr ( SteamManager::get().lobbyPeerId() ), ( uint16_t ) 0 );
+                proceed = true;
+            }
+            else
+            {
+                sessionError = "Could not find a Steam lobby with that code";
+            }
+        }
+    }
+
+    if ( proceed )
+    {
+        _netplayConfig.clear();
+        RUN ( _address, initialConfig );
+        _ui->popNonUserInput();
+    }
+
+    // Release our ref (guarded no-op if MainApp already shut Steam down before launching).
+    SteamManager::get().deref();
+
+    if ( ! sessionError.empty() )
+    {
+        _ui->pushBelow ( new ConsoleUi::TextBox ( sessionError ), { 1, 0 } ); // Expand width
+        sessionError.clear();
+    }
+#endif
 }
 
 void MainUi::server ( RunFuncPtr run )
@@ -1652,6 +1770,7 @@ void MainUi::main ( RunFuncPtr run )
         const vector<string> options =
         {
             "Netplay",
+            "Steam",
             "Spectate",
             "Broadcast",
             "Offline",
@@ -1709,7 +1828,7 @@ void MainUi::main ( RunFuncPtr run )
 
         _ui->clearRight();
 
-        if ( mainSelection >= 0 && mainSelection <= 4 )
+        if ( mainSelection >= 0 && mainSelection <= 5 )
         {
             _config.setInteger ( "lastMainMenuPosition", mainSelection + 1 );
             saveConfig();
@@ -1722,34 +1841,38 @@ void MainUi::main ( RunFuncPtr run )
                 break;
 
             case 1:
-                spectate ( run );
+                steam ( run );
                 break;
 
             case 2:
-                broadcast ( run );
+                spectate ( run );
                 break;
 
             case 3:
-                offline ( run );
+                broadcast ( run );
                 break;
 
             case 4:
-                server( run );
+                offline ( run );
                 break;
 
             case 5:
-                controls();
+                server( run );
                 break;
 
             case 6:
-                settings();
+                controls();
                 break;
 
             case 7:
-                update();
+                settings();
                 break;
 
             case 8:
+                update();
+                break;
+
+            case 9:
                 results();
                 break;
 

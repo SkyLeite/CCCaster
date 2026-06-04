@@ -98,6 +98,34 @@ CC_FLAGS += -mmmx -msse -msse2 -msse3 -mssse3
 # Linker flags
 LD_FLAGS = -m32 -static -lws2_32 -lpsapi -lwinpthread -lwinmm -lole32 -ldinput -lwininet -ldwmapi -lgdi32
 
+# ----- Steamworks (optional Steam connection method) -----
+# Disabled unless STEAM_SDK is set to the 'public' dir of the Steamworks SDK, e.g.:
+#   make STEAM_SDK=../SteamworksSDK/public
+# When set, -DENABLE_STEAM is defined and the 32-bit steam_api import lib is linked.
+# steam_api.dll (32-bit, from <sdk>/redistributable_bin/) + a steam_appid.txt containing
+# 411370 must be shipped next to MBAA.exe at runtime. All Steam code is #ifdef ENABLE_STEAM
+# so builds without STEAM_SDK are byte-for-byte unaffected.
+STEAM_SDK ?=
+STEAM_LIB =
+STEAM_PKG_ROOT = true
+STEAM_PKG_FOLDER = true
+ifneq ($(STEAM_SDK),)
+    DEFINES += -DENABLE_STEAM
+    INCLUDES += -I$(STEAM_SDK)
+    # MinGW links the MSVC import lib directly (verified). If a future toolchain refuses,
+    # generate one with: gendef steam_api.dll && dlltool -d steam_api.def -l libsteam_api.a
+    # Linked ONLY into the main exe + hook.dll (see their recipes), NOT the build-time tools
+    # (generator/debugger), so those don't acquire a steam_api.dll runtime dependency.
+    STEAM_LIB = $(STEAM_SDK)/../redistributable_bin/steam_api.lib
+    # Runtime files: steam_api.dll (32-bit) + steam_appid.txt(411370) must sit in the game
+    # dir (next to MBAA.exe / the main exe, which is also MBAA.exe's working dir) so both the
+    # launcher and the injected hook.dll can load Steam. We drop them next to the main exe and
+    # bundle a copy in the cccaster/ folder for the release archive.
+    STEAM_DLL = $(STEAM_SDK)/../redistributable_bin/steam_api.dll
+    STEAM_PKG_ROOT = cp -f $(STEAM_DLL) ./ && printf '411370' > ./steam_appid.txt
+    STEAM_PKG_FOLDER = cp -f $(STEAM_DLL) $(FOLDER)/ && printf '411370' > $(FOLDER)/steam_appid.txt
+endif
+
 # Build options
 # DEFINES += -DDISABLE_LOGGING
 # DEFINES += -DDISABLE_ASSERTS
@@ -162,17 +190,19 @@ endif
 
 $(BINARY): $(addprefix $(BUILD_PREFIX)/,$(MAIN_OBJECTS)) res/icon.res
 	rm -f $(filter-out $(BINARY),$(wildcard $(NAME)*.exe))
-	$(CXX) -o $@ $(CC_FLAGS) -Wall -std=c++2a -fconcepts $^ $(LD_FLAGS)
+	$(CXX) -o $@ $(CC_FLAGS) -Wall -std=c++2a -fconcepts $^ $(LD_FLAGS) $(STEAM_LIB)
 	@echo
 	$(STRIP) $@
 	$(CHMOD_X)
+	$(STEAM_PKG_ROOT)
 	@echo
 
 $(FOLDER)/$(DLL): $(addprefix $(BUILD_PREFIX)/,$(DLL_OBJECTS)) res/rollback.o targets/CallDraw.s | $(FOLDER)
-	$(CXX) -o $@ $(CC_FLAGS) -Wall -std=c++2a -fconcepts $^ -shared $(LD_FLAGS) -ld3dx9
+	$(CXX) -o $@ $(CC_FLAGS) -Wall -std=c++2a -fconcepts $^ -shared $(LD_FLAGS) -ld3dx9 $(STEAM_LIB)
 	@echo
 	$(STRIP) $@
 	$(GRANT)
+	$(STEAM_PKG_FOLDER)
 	@echo
 
 $(FOLDER)/$(LAUNCHER): tools/Launcher.cpp | $(FOLDER)
@@ -229,7 +259,7 @@ res/icon.res: res/icon.rc res/icon.ico
 
 LOGGING_PREFIX = build_logging_$(BRANCH)
 DEBUGGER_LIB_OBJECTS = \
-	$(addprefix $(LOGGING_PREFIX)/,$(filter-out lib/Version.o lib/LoggerLogVersion.o lib/ConsoleUi.o,$(LIB_OBJECTS)))
+	$(addprefix $(LOGGING_PREFIX)/,$(filter-out lib/Version.o lib/LoggerLogVersion.o lib/ConsoleUi.o lib/SteamManager.o lib/SteamSocket.o,$(LIB_OBJECTS)))
 
 tools/$(DEBUGGER): tools/Debugger.cpp $(DEBUGGER_LIB_OBJECTS)
 	$(CXX) -o $@ $(CC_FLAGS) $(LOGGING_FLAGS) -Wall -std=c++2a -fconcepts $^ $(LD_FLAGS) \
@@ -241,7 +271,7 @@ tools/$(DEBUGGER): tools/Debugger.cpp $(DEBUGGER_LIB_OBJECTS)
 
 
 GENERATOR_LIB_OBJECTS = \
-	$(addprefix $(LOGGING_PREFIX)/,$(filter-out lib/Version.o lib/LoggerLogVersion.o lib/ConsoleUi.o,$(LIB_OBJECTS)))
+	$(addprefix $(LOGGING_PREFIX)/,$(filter-out lib/Version.o lib/LoggerLogVersion.o lib/ConsoleUi.o lib/SteamManager.o lib/SteamSocket.o,$(LIB_OBJECTS)))
 
 tools/$(GENERATOR): tools/Generator.cpp $(GENERATOR_LIB_OBJECTS)
 	$(CXX) -o $@ $(CC_FLAGS) $(LOGGING_FLAGS) -Wall -std=c++2a -fconcepts $^ $(LD_FLAGS)
