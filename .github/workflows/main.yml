@@ -1,41 +1,141 @@
-# This is a basic workflow to help you get started with Actions
 name: CI
 
-# Controls when the workflow will run
+# Build on every push to master, every PR, and every tag. Tags additionally
+# cut a draft GitHub release with the built artifact + an auto-generated changelog.
 on:
-  # Triggers the workflow on push or pull request events but only for the master branch
   push:
     branches: [ master ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ master ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+# Default to read-only; the release job opts into write below.
+permissions:
+  contents: read
+
 jobs:
-  # This workflow contains a single job called "build"
+  # ------------------------------------------------------------------ build
+  # Builds the Steam-enabled release zip on a Windows runner using the same
+  # 32-bit MSYS2/MinGW toolchain the project builds with locally, then uploads
+  # the zip as a workflow artifact (persisted on every commit).
   build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v3
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          # imgui + SteamworksSDK are git submodules; recursive pulls both.
+          submodules: recursive
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: uname
-      - name: Set up MinGW
-        uses: egor-tensin/setup-mingw@v2
-      - name: Install wine
+      - name: Set up MSYS2 (MINGW32 / i686)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: true
+          # mingw-w64-i686-toolchain provides i686-w64-mingw32-{gcc,g++}, windres,
+          # strip, objcopy and the d3dx9 import lib needed to link hook.dll.
+          install: >-
+            make
+            rsync
+            zip
+            git
+            mingw-w64-i686-toolchain
+
+      - name: Build Steam release
         run: |
-          sudo dpkg --add-architecture i386
-          wget -qO - https://dl.winehq.org/wine-builds/winehq.key | sudo apt-key add -
-          sudo add-apt-repository ppa:cybermax-dexter/sdl2-backport
-          sudo apt-add-repository "deb https://dl.winehq.org/wine-builds/ubuntu $(lsb_release -cs) main"
-          sudo apt install --install-recommends winehq-stable
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
-        run: make release
+          set -euo pipefail
+          # The Makefile hardcodes the toolchain prefix as ../mingw32/bin/i686-w64-mingw32-*
+          # (a symlink to the MSYS2 mingw32 tree on the dev's machine). Reproduce that layout.
+          ln -sfn /mingw32 ../mingw32
+          # MSYS2's recipe shell can blank TMP/TEMP, making native gcc/collect2 fall back to a
+          # non-writable C:\WINDOWS temp. Wrap the recipe shell to force a writable temp — same
+          # fix as scripts/build-steam.sh.
+          printf '%s\n' '#!/usr/bin/sh' 'export TMPDIR=/tmp TMP=/tmp TEMP=/tmp' 'shift' 'eval "$@"' > /tmp/recipe-shell.sh
+          chmod +x /tmp/recipe-shell.sh
+          # STEAM_SDK enables -DENABLE_STEAM and links the 32-bit steam_api import lib; the
+          # resulting zip bundles steam_api.dll + steam_appid.txt via the Makefile's STEAM_PKG_*
+          # hooks. CHMOD_X/GRANT are no-oped to skip per-file icacls calls (not needed in CI).
+          make release \
+            STEAM_SDK=3rdparty/SteamworksSDK/public \
+            OS=Windows_NT \
+            SHELL=/tmp/recipe-shell.sh \
+            CHMOD_X=true GRANT=true
+
+      - name: Stage artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp cccaster.v*.zip dist/
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cccaster-${{ github.sha }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- release
+  # On a tag push (v*), create a DRAFT release with the built zip attached and
+  # release notes auto-generated from the git log since the previous tag.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (full history + tags for changelog)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Generate changelog from git log
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          prev="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          {
+            echo "## ${tag}"
+            echo
+            if [ -n "${prev}" ]; then
+              echo "Changes since ${prev}:"
+              echo
+              git log "${prev}..${tag}" --no-merges --pretty='- %s (%h)'
+            else
+              echo "Changes:"
+              echo
+              git log "${tag}" --no-merges --pretty='- %s (%h)'
+            fi
+          } > RELEASE_NOTES.md
+          echo "----- generated notes -----"
+          cat RELEASE_NOTES.md
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mapfile -t assets < <(find dist -type f -name '*.zip')
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No build artifacts (*.zip) found to attach" >&2
+            exit 1
+          fi
+          echo "Attaching: ${assets[*]}"
+          gh release create "${tag}" \
+            --draft \
+            --title "${tag}" \
+            --notes-file RELEASE_NOTES.md \
+            "${assets[@]}"
