@@ -252,6 +252,13 @@ struct MainApp
 
         _.doDeinit = !EventManager::get().isRunning();
 
+#ifdef ENABLE_STEAM
+        // The SDR relay network must be ready before ConnectP2P / listen, or the connection tends
+        // to fail. It is usually already warm from the lobby; wait (bounded) just in case.
+        if ( clientMode.isSteam() )
+            SteamManager::get().waitRelayNetworkReady();
+#endif
+
         if ( clientMode.isHost() )
         {
             if ( !ui.isServer() ) {

@@ -12,6 +12,8 @@
 // See the steamworks-mingw-flat-api note.
 #include "steam/steam_api_flat.h"
 
+#include <windows.h>         // Sleep
+
 #include <vector>
 #include <cstdlib>
 #include <cstdio>
@@ -22,6 +24,11 @@ using namespace std;
 
 // How often to pump dispatch + drain messages
 #define PUMP_INTERVAL_MS ( 2 )
+
+// Bounded wait for the SDR relay network in waitRelayNetworkReady(): ~5s total (500 * 10ms),
+// matching SteamMatchmaking's gate.
+#define RELAY_READY_TRIES ( 500 )
+#define RELAY_READY_SLEEP_MS ( 10 )
 
 // Max messages drained per connection per pump (leftovers come next pump).
 #define RECV_BATCH ( 32 )
@@ -156,6 +163,20 @@ bool SteamManager::isRelayNetworkReady() const
 
     return ( SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus ( SteamNetworkingUtils(), nullptr )
              == k_ESteamNetworkingAvailability_Current );
+}
+
+bool SteamManager::waitRelayNetworkReady()
+{
+    // Mirror the matchmaking gate (SteamMatchmaking::waitConnected): ~5s of manual pumping, then
+    // proceed regardless. After a fresh ref() the relay config is often cached and this returns
+    // almost immediately; only a cold fetch takes a moment.
+    for ( int i = 0; i < RELAY_READY_TRIES && ! isRelayNetworkReady(); ++i )
+    {
+        pump();
+        Sleep ( RELAY_READY_SLEEP_MS );
+    }
+
+    return isRelayNetworkReady();
 }
 
 

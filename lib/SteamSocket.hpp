@@ -92,6 +92,10 @@ private:
     // Remote peer SteamID64 (client/child only).
     uint64_t _peerSteamId = 0;
 
+    // Bounded re-attempts of a client ConnectP2P that closed before ever reaching Connected (e.g.
+    // the SDR relay momentarily flaked). Pairs with SteamManager::waitRelayNetworkReady().
+    int _connectRetries = 0;
+
     // Server: the just-accepted child waiting to be accept()'d out, and live children.
     SocketPtr _acceptedSocket;
     std::unordered_map<uint32_t, SocketPtr> _childSockets;

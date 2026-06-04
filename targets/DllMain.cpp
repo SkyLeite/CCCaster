@@ -1842,8 +1842,14 @@ struct DllMain
 #ifdef ENABLE_STEAM
                     // Launcher shut down its Steam instance before spawning the game; bring
                     // Steam up in-process so we can re-establish the P2P connection by SteamID.
+                    // This ref() is a cold init, so wait (bounded) for the SDR relay network to
+                    // come up before listen/connect below - connecting too early tends to fail.
+                    // Runs on the DLL's network thread, so this does not stall the game's render.
                     if ( clientMode.isSteam() )
+                    {
                         SteamManager::get().ref();
+                        SteamManager::get().waitRelayNetworkReady();
+                    }
 #endif
 
                     if ( clientMode.isHost() )

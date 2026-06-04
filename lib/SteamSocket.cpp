@@ -15,6 +15,9 @@ using namespace std;
           SOCKET, SOCKET->_conn, SOCKET->_listenHandle, \
           ( unsigned long long ) SOCKET->_peerSteamId, SOCKET->_state, ## __VA_ARGS__ )
 
+// How many times a client ConnectP2P that closed before connecting is re-attempted (see onClosed).
+#define STEAM_CONNECT_RETRIES ( 5 )
+
 
 // Encode a SteamID into the synthetic address string used everywhere CCCaster expects an
 // IpAddrPort. Keeping addr non-empty also makes the base Socket's isClient()/isServer()
@@ -261,6 +264,29 @@ void SteamSocket::onConnected()
 void SteamSocket::onClosed()
 {
     LOG_STEAM_SOCKET ( this, "socketDisconnected" );
+
+    // A client connection that dropped before ever reaching Connected may have just raced the SDR
+    // relay coming up (or a one-off NAT-punch failure). Re-attempt a bounded number of times
+    // before surfacing the disconnect. Server/child sockets, and sockets that DID connect (a real
+    // mid-match drop, state == Connected), fall through and disconnect as before.
+    if ( _peerSteamId && _parentSocket == 0 && _state == State::Connecting && _conn
+         && _connectRetries < STEAM_CONNECT_RETRIES )
+    {
+        ++_connectRetries;
+
+        SteamManager& sm = SteamManager::get();
+        sm.unregisterConnection ( _conn );
+        sm.closeConnection ( _conn );
+        _conn = sm.connectP2P ( _peerSteamId, _virtualPort );
+
+        if ( _conn )
+        {
+            sm.registerConnection ( _conn, this );
+            LOG_STEAM_SOCKET ( this, "retrying connectP2P (%d)", _connectRetries );
+            return;
+        }
+        // connectP2P failed outright; fall through to a normal disconnect.
+    }
 
     Socket::Owner *const ownerCopy = this->owner;
 

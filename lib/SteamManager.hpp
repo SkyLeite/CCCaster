@@ -45,6 +45,12 @@ public:
     // ready tends to fail, so callers should gate on it.
     bool isRelayNetworkReady() const;
 
+    // Pump until the SDR relay network is ready (so a subsequent ConnectP2P / listen succeeds),
+    // or until a bounded timeout (~5s) elapses. Cheap no-op when already ready. Returns the final
+    // readiness. Safe to call directly in a wait loop (no EventManager needed). Do NOT call from
+    // inside a Steam callback (e.g. SteamSocket::onClosed) - it pumps, which would be re-entrant.
+    bool waitRelayNetworkReady();
+
     // ---- transport wrappers (all handles are plain ints; 0 == invalid) ----
 
     // Host: open a P2P listen socket on a virtual port. Returns the listen handle.
