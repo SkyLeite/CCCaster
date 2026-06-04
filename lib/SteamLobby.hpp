@@ -2,6 +2,7 @@
 
 #include "ILobbyBackend.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -48,11 +49,34 @@ public:
     void refresh() override;
     void pumpUntilSettled() override;
 
+    // king-of-the-hill queue
+    bool supportsQueue() const override { return true; }
+    void setReady ( bool ready ) override;
+    QueueState getQueueState() override;
+    void reportResult ( uint32_t gen, uint64_t winnerId ) override;
+    void coordinatorTick() override;
+
 private:
 
     // Which async Steam op is in flight, so pumpUntilSettled() knows what to wait on + apply.
     enum Pending { P_NONE, P_CREATE, P_JOIN, P_BROWSE };
     Pending _pending = P_NONE;
+
+    // ---- queue state ----
+    bool _ready = false;                   // our own ready flag (source of truth we advertise)
+    QueueState _qs;                        // cached snapshot, rebuilt in refresh() under entryMutex
+
+    // Owner-only authoritative queue (front..back). Seeded from the published order on first tick
+    // / after ownership migration, then maintained in memory.
+    std::vector<uint64_t> _queueOrder;
+    uint32_t _gen = 0;                     // last gen we (as owner) published
+
+    // Rebuild _qs from the lobby + member data (called at the end of refresh() in CONCERTO_LOBBY).
+    void readQueueState();
+
+    // Owner helpers.
+    uint64_t readResult ( uint32_t gen, uint64_t host, uint64_t client );
+    void publishMatchOrAssemble();
 
     // Per-mode menu vectors (rebuilt in refresh(); read by getMenu/getIps/getIds while MainUi
     // holds entryMutex, so those readers must not re-lock).

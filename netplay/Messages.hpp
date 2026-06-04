@@ -289,6 +289,28 @@ struct ConfirmConfig : public SerializableSequence
 };
 
 
+// Sent over IPC from the DLL to the standalone when a match ends (entering RetryMenu). The
+// standalone side otherwise only learns the result via results.csv; the king-of-the-hill lobby
+// queue needs it directly. hostWon is derived from the synced win counts + hostPlayer, so it is
+// computed identically on both the host and the client.
+struct MatchResult : public SerializableSequence
+{
+    uint8_t hostWon = 0;
+    uint8_t p1Wins = 0;
+    uint8_t p2Wins = 0;
+
+    MatchResult ( uint8_t hostWon, uint8_t p1Wins, uint8_t p2Wins )
+        : hostWon ( hostWon ), p1Wins ( p1Wins ), p2Wins ( p2Wins ) {}
+
+    std::string str() const override
+    {
+        return format ( "MatchResult[hostWon=%u;%u-%u]", hostWon, p1Wins, p2Wins );
+    }
+
+    PROTOCOL_MESSAGE_BOILERPLATE ( MatchResult, hostWon, p1Wins, p2Wins )
+};
+
+
 struct RngState : public SerializableSequence
 {
     uint32_t index = 0;

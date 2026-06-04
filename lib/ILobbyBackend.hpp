@@ -26,6 +26,36 @@ enum LobbyMode
 };
 
 
+// Role this client plays in the current king-of-the-hill match.
+enum class QueueRole
+{
+    None,       // not in a match: sit in the lobby menu (un-readied)
+    Host,       // play, hosting (the reigning "king")
+    Client,     // play, connecting to the king
+    Spectator,  // readied but waiting: auto-spectate the live match
+};
+
+// Phase of the queue, broadcast by the lobby owner.
+enum class QueuePhase
+{
+    Assembling, // fewer than two ready, or between matches: no live match
+    Playing,    // a match is live (hostId vs clientId)
+};
+
+// Snapshot of the king-of-the-hill queue, rebuilt each refresh() and read by MainUi (Steam only).
+struct QueueState
+{
+    uint32_t gen = 0;                       // current match generation; 0 == none yet
+    QueuePhase phase = QueuePhase::Assembling;
+    QueueRole myRole = QueueRole::None;
+    uint64_t hostId = 0;                    // current match host (the king)
+    uint64_t clientId = 0;                  // current challenger
+    IpAddrPort hostAddr;                    // steam:<hostId>, for Client / Spectator to connect to
+    bool iAmReady = false;
+    std::vector<std::string> rows;          // display rows for the lobby UI
+};
+
+
 // Backend interface for the "Server -> Lobby" menu. MainUi drives this surface; a concrete
 // backend is either the relay/Concerto server (ServerLobby, a Thread+Socket) or Steam lobbies
 // (SteamLobby, driven by SteamManager's pump). The seam virtuals (isSteam/needsEventManager/
@@ -98,4 +128,24 @@ struct ILobbyBackend
     // MainUi's uiCondVar from its thread instead, so this is a no-op there; the Steam backend
     // runs a bounded pump loop until its pending op reaches a terminal state.
     virtual void pumpUntilSettled() {}
+
+    // ---- king-of-the-hill queue (Steam backend only; no-ops elsewhere) ----
+
+    // True if this backend drives the auto-matchmaking queue instead of the manual challenge flow.
+    virtual bool supportsQueue() const { return false; }
+
+    // Toggle our own "ready to play" flag (advertised as member data).
+    virtual void setReady ( bool ready ) {}
+
+    // The current queue snapshot. Called by MainUi while it holds entryMutex (like getMenu()), so
+    // implementations must NOT re-lock; refresh() rebuilds the cached snapshot under the lock.
+    virtual QueueState getQueueState() { return {}; }
+
+    // Publish the outcome of match `gen` (our own member data). Both players report; on a clean
+    // finish they agree, on a disconnect only the survivor reports itself.
+    virtual void reportResult ( uint32_t gen, uint64_t winnerId ) {}
+
+    // Owner-only: advance the queue and publish the next assignment. No-op when not the owner.
+    // Safe to call every UI tick.
+    virtual void coordinatorTick() {}
 };

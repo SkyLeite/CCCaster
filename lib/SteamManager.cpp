@@ -465,6 +465,37 @@ void SteamManager::setLobbyMemberName ( const std::string& name )
         SteamAPI_ISteamMatchmaking_SetLobbyMemberData ( SteamMatchmaking(), _lobbyId, MEMBER_NAME_KEY, name.c_str() );
 }
 
+void SteamManager::setLobbyData ( const std::string& key, const std::string& value )
+{
+    // No-op for non-owners: Steam ignores SetLobbyData unless we own the lobby.
+    if ( _inited && _lobbyId )
+        SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), _lobbyId, key.c_str(), value.c_str() );
+}
+
+std::string SteamManager::getLobbyData ( const std::string& key )
+{
+    if ( ! _inited || ! _lobbyId )
+        return "";
+
+    const char *v = SteamAPI_ISteamMatchmaking_GetLobbyData ( SteamMatchmaking(), _lobbyId, key.c_str() );
+    return v ? v : "";
+}
+
+void SteamManager::setMyMemberData ( const std::string& key, const std::string& value )
+{
+    if ( _inited && _lobbyId )
+        SteamAPI_ISteamMatchmaking_SetLobbyMemberData ( SteamMatchmaking(), _lobbyId, key.c_str(), value.c_str() );
+}
+
+std::string SteamManager::getMemberData ( uint64_t memberId, const std::string& key )
+{
+    if ( ! _inited || ! _lobbyId )
+        return "";
+
+    const char *v = SteamAPI_ISteamMatchmaking_GetLobbyMemberData ( SteamMatchmaking(), _lobbyId, memberId, key.c_str() );
+    return v ? v : "";
+}
+
 void SteamManager::setChallenge ( uint64_t targetId )
 {
     if ( ! _inited || ! _lobbyId )

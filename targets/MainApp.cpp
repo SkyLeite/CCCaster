@@ -1264,6 +1264,13 @@ struct MainApp
                 updateStatusMessage();
                 return;
 
+            case MsgType::MatchResult:
+                ui.lastMatchResult.valid = true;
+                ui.lastMatchResult.hostWon = msg->getAs<MatchResult>().hostWon;
+                ui.lastMatchResult.p1Wins = msg->getAs<MatchResult>().p1Wins;
+                ui.lastMatchResult.p2Wins = msg->getAs<MatchResult>().p2Wins;
+                return;
+
             case MsgType::IpAddrPort:
                 if ( ctrlSocket && ctrlSocket->isConnected() )
                     ctrlSocket->send ( msg );

@@ -3,10 +3,12 @@
 #include "SteamLobby.hpp"
 #include "SteamManager.hpp"
 #include "SteamSocket.hpp"   // steamAddr()
+#include "LobbyQueue.hpp"
 #include "Logger.hpp"
 
 #include <windows.h>         // Sleep
 #include <cctype>
+#include <cstdlib>
 
 using namespace std;
 
@@ -15,6 +17,54 @@ using namespace std;
 // during the lobby menu, so we drive SteamManager's manual dispatch directly here.
 #define SETTLE_TRIES ( 500 )
 #define SETTLE_SLEEP_MS ( 10 )
+
+
+// ---- king-of-the-hill queue keys ----
+// Lobby data (owner-written) broadcasts the current match assignment; member data (self-written)
+// carries each player's ready flag and reported result.
+static const char *Q_GEN_KEY    = "q_gen";      // match generation counter
+static const char *Q_STATE_KEY  = "q_state";    // "PLAYING" / "ASSEMBLING"
+static const char *Q_ORDER_KEY  = "q_order";    // comma-separated SteamIDs, front..back
+static const char *Q_HOST_KEY   = "q_host";     // current king (host) SteamID
+static const char *Q_CLIENT_KEY = "q_client";   // current challenger SteamID
+static const char *READY_KEY    = "q_ready";    // member: "1" if readied to play
+static const char *R_GEN_KEY    = "q_rgen";     // member: gen this reported result is for
+static const char *R_WINNER_KEY = "q_rwinner";  // member: winning SteamID for R_GEN
+
+
+static string joinIds ( const vector<uint64_t>& ids )
+{
+    string s;
+    for ( size_t i = 0; i < ids.size(); ++i )
+    {
+        if ( i )
+            s += ",";
+        char b[32];
+        snprintf ( b, sizeof ( b ), "%llu", ( unsigned long long ) ids[i] );
+        s += b;
+    }
+    return s;
+}
+
+static vector<uint64_t> splitIds ( const string& s )
+{
+    vector<uint64_t> out;
+    size_t i = 0;
+    while ( i < s.size() )
+    {
+        size_t j = s.find ( ',', i );
+        if ( j == string::npos )
+            j = s.size();
+        if ( j > i )
+        {
+            const uint64_t v = strtoull ( s.substr ( i, j - i ).c_str(), nullptr, 10 );
+            if ( v )
+                out.push_back ( v );
+        }
+        i = j + 1;
+    }
+    return out;
+}
 
 
 SteamLobby::SteamLobby ( ILobbyBackend::Owner* owner )
@@ -47,6 +97,9 @@ bool SteamLobby::isRunning()
 
 void SteamLobby::stop()
 {
+    // Drop out of the play queue before leaving so the owner doesn't keep us in the rotation.
+    if ( _ready )
+        setReady ( false );
     SteamManager::get().leaveLobby();
 }
 
@@ -63,7 +116,7 @@ vector<string> SteamLobby::getMenu()
         case CONCERTO_BROWSE:
             return publiclobbies;
         case CONCERTO_LOBBY:
-            return lobbyentries;
+            return _qs.rows;
         default:
             return {};
     }
@@ -209,47 +262,15 @@ void SteamLobby::refresh()
     for ( int i = 0; i < 3; ++i )
         sm.pump();
 
-    LOCK ( entryMutex );
-
     if ( mode == CONCERTO_LOBBY )
     {
-        const uint64_t myId = sm.getSteamID();
-        const vector<SteamManager::MemberInfo> members = sm.lobbyMembers();
-
-        lobbyentries.clear();
-        lobbyips.clear();
-        lobbyids.clear();
-
-        for ( const SteamManager::MemberInfo& m : members )
-        {
-            if ( m.steamId == myId )
-                continue; // don't list / challenge ourselves
-
-            char idStr[32];
-            snprintf ( idStr, sizeof ( idStr ), "%llu", ( unsigned long long ) m.steamId );
-
-            string disp = m.name.empty() ? string ( idStr ) : m.name;
-            string ip = "None";
-
-            if ( m.challengingTarget == myId )
-            {
-                // This member is challenging us and is hosting -> we connect to them as Client.
-                ip = steamAddr ( m.hostId ? m.hostId : m.steamId );
-            }
-            else if ( m.challengingTarget != 0 )
-            {
-                disp += " (busy)";
-            }
-
-            lobbyentries.push_back ( disp );
-            lobbyids.push_back ( idStr );
-            lobbyips.push_back ( ip );
-        }
-
-        numEntries = ( int ) lobbyentries.size();
+        LOCK ( entryMutex );
+        readQueueState();
     }
     else if ( mode == CONCERTO_BROWSE )
     {
+        LOCK ( entryMutex );
+
         publiclobbies.clear();
         roomcodes.clear();
 
@@ -320,6 +341,224 @@ void SteamLobby::finishPending()
         default:
             break;
     }
+}
+
+
+// ---- king-of-the-hill queue ----
+
+void SteamLobby::setReady ( bool ready )
+{
+    _ready = ready;
+    SteamManager::get().setMyMemberData ( READY_KEY, ready ? "1" : "0" );
+}
+
+QueueState SteamLobby::getQueueState()
+{
+    // Called by MainUi while it holds entryMutex (like getMenu()); just return the cached snapshot.
+    return _qs;
+}
+
+void SteamLobby::reportResult ( uint32_t gen, uint64_t winnerId )
+{
+    SteamManager& sm = SteamManager::get();
+    // Write the winner before the gen, so a reader that sees the new gen always sees a winner.
+    sm.setMyMemberData ( R_WINNER_KEY, to_string ( winnerId ) );
+    sm.setMyMemberData ( R_GEN_KEY, to_string ( gen ) );
+}
+
+uint64_t SteamLobby::readResult ( uint32_t gen, uint64_t host, uint64_t client )
+{
+    SteamManager& sm = SteamManager::get();
+    const uint64_t players[2] = { host, client };
+    for ( uint64_t pid : players )
+    {
+        if ( ! pid )
+            continue;
+        const uint32_t rgen = ( uint32_t ) strtoul ( sm.getMemberData ( pid, R_GEN_KEY ).c_str(), nullptr, 10 );
+        if ( rgen == gen )
+        {
+            const uint64_t w = strtoull ( sm.getMemberData ( pid, R_WINNER_KEY ).c_str(), nullptr, 10 );
+            if ( w )
+                return w;
+        }
+    }
+    return 0;
+}
+
+void SteamLobby::publishMatchOrAssemble()
+{
+    SteamManager& sm = SteamManager::get();
+
+    if ( _queueOrder.size() >= 2 )
+    {
+        ++_gen;
+        sm.setLobbyData ( Q_ORDER_KEY, joinIds ( _queueOrder ) );
+        sm.setLobbyData ( Q_HOST_KEY, to_string ( _queueOrder[0] ) );
+        sm.setLobbyData ( Q_CLIENT_KEY, to_string ( _queueOrder[1] ) );
+        sm.setLobbyData ( Q_GEN_KEY, to_string ( _gen ) );
+        sm.setLobbyData ( Q_STATE_KEY, "PLAYING" );
+        LOG ( "Queue gen=%u host=%llu client=%llu", _gen,
+              ( unsigned long long ) _queueOrder[0], ( unsigned long long ) _queueOrder[1] );
+    }
+    else
+    {
+        // Only (re)write when something changed, to avoid SetLobbyData rate-limit spam.
+        const string order = joinIds ( _queueOrder );
+        if ( sm.getLobbyData ( Q_STATE_KEY ) != "ASSEMBLING" )
+            sm.setLobbyData ( Q_STATE_KEY, "ASSEMBLING" );
+        if ( sm.getLobbyData ( Q_ORDER_KEY ) != order )
+            sm.setLobbyData ( Q_ORDER_KEY, order );
+    }
+}
+
+void SteamLobby::coordinatorTick()
+{
+    if ( mode != CONCERTO_LOBBY )
+        return;
+
+    SteamManager& sm = SteamManager::get();
+    const uint64_t myId = sm.getSteamID();
+
+    // Only the lobby owner coordinates. SetLobbyData from anyone else is ignored by Steam anyway,
+    // and ownership migrates automatically if the owner leaves, so a successor seamlessly resumes.
+    if ( sm.lobbyOwnerId() != myId )
+        return;
+
+    // Snapshot members once; derive the ready set and a membership test from it.
+    const vector<SteamManager::MemberInfo> members = sm.lobbyMembers();
+    vector<uint64_t> ready;
+    for ( const SteamManager::MemberInfo& m : members )
+        if ( sm.getMemberData ( m.steamId, READY_KEY ) == "1" )
+            ready.push_back ( m.steamId );
+
+    auto isMember = [&] ( uint64_t id ) -> bool
+    {
+        for ( const SteamManager::MemberInfo& m : members )
+            if ( m.steamId == id )
+                return true;
+        return false;
+    };
+
+    // Adopt the last-published order on first run / after an ownership migration.
+    if ( _queueOrder.empty() )
+    {
+        _queueOrder = splitIds ( sm.getLobbyData ( Q_ORDER_KEY ) );
+        _gen = ( uint32_t ) strtoul ( sm.getLobbyData ( Q_GEN_KEY ).c_str(), nullptr, 10 );
+    }
+
+    if ( sm.getLobbyData ( Q_STATE_KEY ) == "PLAYING" )
+    {
+        const uint32_t gen   = ( uint32_t ) strtoul ( sm.getLobbyData ( Q_GEN_KEY ).c_str(), nullptr, 10 );
+        const uint64_t host  = strtoull ( sm.getLobbyData ( Q_HOST_KEY ).c_str(), nullptr, 10 );
+        const uint64_t client = strtoull ( sm.getLobbyData ( Q_CLIENT_KEY ).c_str(), nullptr, 10 );
+
+        const uint64_t winner = readResult ( gen, host, client );
+        if ( winner )
+        {
+            // Normal case: a player reported the outcome.
+            _queueOrder = LobbyQueue::advance ( _queueOrder, host, client, winner, ready );
+            publishMatchOrAssemble();
+        }
+        else if ( ! isMember ( host ) && ! isMember ( client ) )
+        {
+            // Both competitors have left the lobby (a live match keeps them as members, so this
+            // is a hard crash, not just a slow result). Drop the pair to the very back.
+            LOG ( "Queue gen=%u: both players left without a result; rotating", gen );
+            const vector<uint64_t> reconciled = LobbyQueue::reconcile ( _queueOrder, ready );
+            vector<uint64_t> head, tail;
+            for ( uint64_t id : reconciled )
+                ( ( id == host || id == client ) ? tail : head ).push_back ( id );
+            head.insert ( head.end(), tail.begin(), tail.end() );
+            _queueOrder = head;
+            publishMatchOrAssemble();
+        }
+        // Otherwise the match is still in progress (or one player crashed and the survivor's
+        // self-report will arrive next tick) -> wait.
+    }
+    else
+    {
+        // Assembling / between matches: keep the order reconciled and start once 2+ are ready.
+        _queueOrder = LobbyQueue::reconcile ( _queueOrder, ready );
+        publishMatchOrAssemble();
+    }
+
+    // Reflect whatever we just published in our own snapshot this same tick, so an owner who is
+    // also a player starts its match without a one-tick lag.
+    LOCK ( entryMutex );
+    readQueueState();
+}
+
+void SteamLobby::readQueueState()
+{
+    // Assumes entryMutex is held by the caller (refresh() / coordinatorTick()).
+    SteamManager& sm = SteamManager::get();
+    const uint64_t myId = sm.getSteamID();
+    const vector<SteamManager::MemberInfo> members = sm.lobbyMembers();
+
+    QueueState qs;
+    qs.gen      = ( uint32_t ) strtoul ( sm.getLobbyData ( Q_GEN_KEY ).c_str(), nullptr, 10 );
+    qs.phase    = ( sm.getLobbyData ( Q_STATE_KEY ) == "PLAYING" ) ? QueuePhase::Playing
+                                                                   : QueuePhase::Assembling;
+    qs.hostId   = strtoull ( sm.getLobbyData ( Q_HOST_KEY ).c_str(), nullptr, 10 );
+    qs.clientId = strtoull ( sm.getLobbyData ( Q_CLIENT_KEY ).c_str(), nullptr, 10 );
+    qs.iAmReady = _ready;
+    if ( qs.hostId )
+        qs.hostAddr = IpAddrPort ( steamAddr ( qs.hostId ), ( uint16_t ) 0 );
+
+    // My role in the current match. Un-readied players stay in the menu (None); readied players who
+    // are not one of the two competitors auto-spectate.
+    if ( qs.phase == QueuePhase::Playing && qs.gen )
+    {
+        if ( qs.hostId == myId )
+            qs.myRole = QueueRole::Host;
+        else if ( qs.clientId == myId )
+            qs.myRole = QueueRole::Client;
+        else if ( _ready )
+            qs.myRole = QueueRole::Spectator;
+        else
+            qs.myRole = QueueRole::None;
+    }
+
+    auto nameOf = [&] ( uint64_t id ) -> string
+    {
+        for ( const SteamManager::MemberInfo& m : members )
+            if ( m.steamId == id )
+                return m.name.empty() ? to_string ( id ) : m.name;
+        return to_string ( id );
+    };
+
+    // Row 0 is the ready toggle (MainUi maps selection 0 -> setReady). The rest are informational.
+    qs.rows.clear();
+    qs.rows.push_back ( _ready ? "[*] Ready - select here to leave the queue"
+                               : "[ ] Ready Up to join the queue" );
+
+    const vector<uint64_t> order = splitIds ( sm.getLobbyData ( Q_ORDER_KEY ) );
+    int pos = 1;
+    for ( uint64_t id : order )
+    {
+        string tag;
+        if ( qs.phase == QueuePhase::Playing && id == qs.hostId )
+            tag = "  [KING - playing]";
+        else if ( qs.phase == QueuePhase::Playing && id == qs.clientId )
+            tag = "  [challenger - playing]";
+        const string me = ( id == myId ) ? " (you)" : "";
+        qs.rows.push_back ( to_string ( pos++ ) + ". " + nameOf ( id ) + me + tag );
+    }
+
+    // Members present but not in the play queue (un-readied watchers).
+    for ( const SteamManager::MemberInfo& m : members )
+    {
+        if ( LobbyQueue::contains ( order, m.steamId ) )
+            continue;
+        const string me = ( m.steamId == myId ) ? " (you)" : "";
+        qs.rows.push_back ( "- " + ( m.name.empty() ? to_string ( m.steamId ) : m.name ) + me + " (watching)" );
+    }
+
+    if ( qs.phase != QueuePhase::Playing && order.size() < 2 )
+        qs.rows.push_back ( "Waiting for players to ready up..." );
+
+    _qs = qs;
+    numEntries = ( int ) qs.rows.size();
 }
 
 #endif // ENABLE_STEAM

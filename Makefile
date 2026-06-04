@@ -259,7 +259,7 @@ res/icon.res: res/icon.rc res/icon.ico
 
 LOGGING_PREFIX = build_logging_$(BRANCH)
 DEBUGGER_LIB_OBJECTS = \
-	$(addprefix $(LOGGING_PREFIX)/,$(filter-out lib/Version.o lib/LoggerLogVersion.o lib/ConsoleUi.o lib/SteamManager.o lib/SteamSocket.o,$(LIB_OBJECTS)))
+	$(addprefix $(LOGGING_PREFIX)/,$(filter-out lib/Version.o lib/LoggerLogVersion.o lib/ConsoleUi.o lib/SteamManager.o lib/SteamSocket.o lib/SteamLobby.o lib/SteamMatchmaking.o,$(LIB_OBJECTS)))
 
 tools/$(DEBUGGER): tools/Debugger.cpp $(DEBUGGER_LIB_OBJECTS)
 	$(CXX) -o $@ $(CC_FLAGS) $(LOGGING_FLAGS) -Wall -std=c++2a -fconcepts $^ $(LD_FLAGS) \
@@ -271,7 +271,7 @@ tools/$(DEBUGGER): tools/Debugger.cpp $(DEBUGGER_LIB_OBJECTS)
 
 
 GENERATOR_LIB_OBJECTS = \
-	$(addprefix $(LOGGING_PREFIX)/,$(filter-out lib/Version.o lib/LoggerLogVersion.o lib/ConsoleUi.o lib/SteamManager.o lib/SteamSocket.o,$(LIB_OBJECTS)))
+	$(addprefix $(LOGGING_PREFIX)/,$(filter-out lib/Version.o lib/LoggerLogVersion.o lib/ConsoleUi.o lib/SteamManager.o lib/SteamSocket.o lib/SteamLobby.o lib/SteamMatchmaking.o,$(LIB_OBJECTS)))
 
 tools/$(GENERATOR): tools/Generator.cpp $(GENERATOR_LIB_OBJECTS)
 	$(CXX) -o $@ $(CC_FLAGS) $(LOGGING_FLAGS) -Wall -std=c++2a -fconcepts $^ $(LD_FLAGS)

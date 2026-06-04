@@ -1092,6 +1092,18 @@ struct DllMain
 
             // Reset retry menu index flag
             localRetryMenuIndexSent = false;
+
+            // Report the match outcome to the standalone (for the lobby queue). hostWon is derived
+            // from the synced win counts + hostPlayer, so it is identical on host and client.
+            if ( clientMode.isNetplay()
+                 && ( netMan.config.hostPlayer == 1 || netMan.config.hostPlayer == 2 ) )
+            {
+                const uint8_t p1w = ( uint8_t ) *CC_P1_WINS_ADDR;
+                const uint8_t p2w = ( uint8_t ) *CC_P2_WINS_ADDR;
+                const uint8_t winnerPlayer = ( p1w >= p2w ) ? 1 : 2;
+                const uint8_t hostWon = ( winnerPlayer == netMan.config.hostPlayer ) ? 1 : 0;
+                procMan.ipcSend ( new MatchResult ( hostWon, p1w, p2w ) );
+            }
         }
         else if ( lazyDisconnect )
         {

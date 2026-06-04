@@ -24,6 +24,18 @@ inline int computeDelay ( double latency )
 }
 
 
+// Outcome of the most recent match, populated from the DLL's MatchResult IPC message (see
+// MainApp::ipcRead). The lobby queue reads this after a match's RUN() returns to advance the
+// king-of-the-hill order. `valid` is cleared before each match and set when a result arrives.
+struct MatchResultInfo
+{
+    bool valid = false;
+    bool hostWon = false;
+    uint8_t p1Wins = 0;
+    uint8_t p2Wins = 0;
+};
+
+
 class ConsoleUi;
 
 class MainUi
@@ -44,6 +56,10 @@ public:
     std::vector<std::string> lobbyText;
     std::vector<std::string> lobbyIps;
     std::vector<std::string> lobbyIds;
+
+    // Most recent match outcome, written by MainApp from the DLL's MatchResult IPC message and
+    // read by the lobby queue after a match (mirrors how sessionError is plumbed from MainApp).
+    MatchResultInfo lastMatchResult;
 
     MainUi();
 

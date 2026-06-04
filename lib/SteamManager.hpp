@@ -104,6 +104,14 @@ public:
     // Advertise our display name to the lobby (so peers can list us by name).
     void setLobbyMemberName ( const std::string& name );
 
+    // ---- generic lobby / member data (used by the king-of-the-hill queue) ----
+    // Lobby data is single-writer: Steam silently ignores SetLobbyData from non-owners, so the
+    // lobby owner is the queue's authoritative coordinator. Member data is self-writable only.
+    void setLobbyData ( const std::string& key, const std::string& value );
+    std::string getLobbyData ( const std::string& key );
+    void setMyMemberData ( const std::string& key, const std::string& value );
+    std::string getMemberData ( uint64_t memberId, const std::string& key );
+
     // ---- challenge handshake (member-data based, no relay) ----
     // Challenger advertises {challenging:<target>, host_id:<self>}; the target sees it on its next
     // member refresh and connects as Client to our SteamID. clearChallenge() withdraws it.

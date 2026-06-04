@@ -235,6 +235,8 @@ void MainUi::lobby( RunFuncPtr run )
     string lobbyBase = "Lobby";
     string lobbyDisplay = lobbyBase;
     string name = _config.getString ( "displayName" );
+    uint32_t myLastGen = 0;     // last king-of-the-hill match generation we acted on (Steam queue)
+    QueueState qs;              // current queue snapshot (Steam queue)
     for ( ;; )
     {
         if ( ! _lobby->isRunning() || ( _lobby->needsEventManager() && ! EventManager::get().isRunning() ) ) {
@@ -244,6 +246,8 @@ void MainUi::lobby( RunFuncPtr run )
         }
         // Steam backend has no background thread; pull fresh lobby/member state on this thread.
         _lobby->refresh();
+        // If we own a king-of-the-hill lobby, advance the queue + publish the next assignment.
+        _lobby->coordinatorTick();
         // Update ui
         LOG("Getting lobby mutex");
         _lobby->entryMutex.lock();
@@ -251,8 +255,68 @@ void MainUi::lobby( RunFuncPtr run )
         numEntries =_lobby->numEntries;
         lobbyIps =_lobby->getIps();
         lobbyIds =_lobby->getIds();
+        qs =_lobby->getQueueState();
         _lobby->entryMutex.unlock();
         LOG("releasing lobby mutex");
+
+#ifdef ENABLE_STEAM
+        // King-of-the-hill auto-start: when the queue assigns us a role for a new match, launch it
+        // directly (no player selection). Un-readied players have role None and stay in the menu.
+        if ( _lobby->supportsQueue() && _lobby->mode == CONCERTO_LOBBY
+             && qs.phase == QueuePhase::Playing && qs.gen > myLastGen && qs.myRole != QueueRole::None )
+        {
+            myLastGen = qs.gen;
+            lastMatchResult.valid = false;
+            initialConfig.mode.flags |= ClientMode::IsSteam;
+
+            if ( qs.myRole == QueueRole::Host )
+            {
+                initialConfig.mode.value = ClientMode::Host;
+                _address = IpAddrPort ( steamAddr ( SteamManager::get().getSteamID() ), ( uint16_t ) 0 );
+            }
+            else if ( qs.myRole == QueueRole::Client )
+            {
+                initialConfig.mode.value = ClientMode::Client;
+                _netplayConfig.clear();
+                _address = qs.hostAddr;
+            }
+            else // Spectator
+            {
+                initialConfig.mode.value = ClientMode::SpectateNetplay;
+                _address = qs.hostAddr;
+            }
+
+            addressSelected = true;
+            LOG ( "Queue gen=%u role=%d prerun", qs.gen, ( int ) qs.myRole );
+            RUN ( _address, initialConfig );
+            LOG ( "Queue gen=%u postrun", qs.gen );
+            _ui->popNonUserInput();
+
+            // Players report the outcome so the owner can advance the queue. Always report a
+            // winner so the queue can never stall: a clean finish gives the real winner (both
+            // sides agree); a disconnect makes the surviving reporter the winner; bailing out
+            // mid-match with no result is a forfeit (the opponent wins).
+            if ( qs.myRole == QueueRole::Host || qs.myRole == QueueRole::Client )
+            {
+                const uint64_t myId = SteamManager::get().getSteamID();
+                const uint64_t oppId = ( qs.myRole == QueueRole::Host ) ? qs.clientId : qs.hostId;
+                uint64_t winner;
+                if ( lastMatchResult.valid )
+                    winner = lastMatchResult.hostWon ? qs.hostId : qs.clientId;
+                else if ( ! sessionError.empty() )
+                    winner = myId;      // opponent dropped; I survived
+                else
+                    winner = oppId;     // I left mid-match without a result -> forfeit
+                if ( winner )
+                    _lobby->reportResult ( qs.gen, winner );
+            }
+
+            // A spectate session ending (the host tore down) surfaces a benign disconnect.
+            sessionError.clear();
+            continue;
+        }
+#endif
+
         int oldPos = _ui->top<ConsoleUi::Menu>()->getPosition();
         _ui->pop();
         _ui->pushInFront ( new ConsoleUi::Menu ( lobbyDisplay,
@@ -332,7 +396,14 @@ void MainUi::lobby( RunFuncPtr run )
                     lobbyDisplay = "  | Room | Players | Error: " + _lobby->lobbyError;
             }
         } else if ( _lobby->mode == CONCERTO_LOBBY ) {
-            if ( mode < 0 || mode >= numEntries ) {
+            if ( _lobby->supportsQueue() ) {
+                // King-of-the-hill queue UI: row 0 toggles our ready flag; Exit (negative) leaves.
+                // Matches auto-start above; informational rows do nothing.
+                if ( mode == 0 )
+                    _lobby->setReady ( ! qs.iAmReady );
+                else if ( mode < 0 )
+                    break;
+            } else if ( mode < 0 || mode >= numEntries ) {
                 break;
             } else {
                 if ( lobbyIps[ mode ] == "None" ) {
