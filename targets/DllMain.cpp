@@ -11,6 +11,7 @@
 #include "SteamManager.hpp"
 #endif
 #include "Exceptions.hpp"
+#include "SentryClient.hpp"
 #include "Enum.hpp"
 #include "ErrorStringsExt.hpp"
 #include "KeyboardState.hpp"
@@ -34,6 +35,24 @@ using namespace std;
 
 // The main log file path
 #define LOG_FILE                    FOLDER "dll.log"
+
+// Build type reported to Sentry as the "environment".
+static const char *sentryEnvironment()
+{
+#if defined(RELEASE)
+    return "release";
+#elif defined(LOGGING)
+    return "logging";
+#else
+    return "debug";
+#endif
+}
+
+// Route SentryClient diagnostics into dll.log.
+static void sentryLogSink ( const char *message )
+{
+    LOG ( "[sentry] %s", message );
+}
 
 // The number of milliseconds to poll for events each frame
 #define POLL_TIMEOUT                ( 3 )
@@ -2168,6 +2187,20 @@ extern "C" BOOL APIENTRY DllMain ( HMODULE, DWORD reason, LPVOID )
             LOG ( "DLL_PROCESS_ATTACH" );
             LOG ( "gameDir='%s'", ProcessManager::gameDir );
 
+            // Initialize crash/error reporting from inside MBAA.exe. No-op unless a DSN was baked
+            // in at build time. A vectored handler + the unhandled-exception filter catch ALL
+            // crashes in the game process; fatal crashes upload synchronously (the process is
+            // dying), while non-fatal captures during a match are uploaded off-thread (see
+            // AsmHacks::callback) so gameplay never stalls.
+            SentryClient::setLogSink ( sentryLogSink );
+            SentryClient::init ( SENTRY_DSN, LocalVersion.code, sentryEnvironment(), LocalVersion.revision );
+            SentryClient::setTag ( "component", "hook-dll" );
+            SentryClient::setTag ( "revision", LocalVersion.revision );
+            SentryClient::setTag ( "build_time", LocalVersion.buildTime );
+            if ( ProcessManager::isWine() )
+                SentryClient::setTag ( "wine", "1" );
+            SentryClient::installCrashHandler();
+
             // We want the DLL to be able to rebind any previously bound ports
             Socket::forceReusePort ( true );
 
@@ -2243,6 +2276,10 @@ extern "C" void callback()
     if ( appState == AppState::Deinitialized )
         return;
 
+    // Captured before the frame runs: decides whether a non-fatal capture below uploads on a
+    // background thread (mid-match, must not stall gameplay) or inline (out of match).
+    const bool inMatch = ( mainApp && mainApp->netMan.isInGame() );
+
     try
     {
         if ( appState == AppState::Uninitialized )
@@ -2258,6 +2295,10 @@ extern "C" void callback()
             // Start polling now
             EventManager::get().startPolling();
             appState = AppState::Polling;
+
+            // The game / D3D runtime installs its own handlers during startup; reclaim the
+            // top-level unhandled-exception filter now that the game is fully loaded.
+            SentryClient::reassertCrashHandler();
         }
 
         ASSERT ( mainApp.get() != 0 );
@@ -2267,17 +2308,21 @@ extern "C" void callback()
     catch ( const Exception& exc )
     {
         LOG ( "Stopping due to exception: %s", exc );
+        // Upload off-thread while mid-match so the game loop never blocks on the network.
+        SentryClient::captureException ( "Exception", exc.str(), inMatch );
         stopDllMain ( exc.user );
     }
 #ifdef NDEBUG
     catch ( const std::exception& exc )
     {
         LOG ( "Stopping due to std::exception: %s", exc.what() );
+        SentryClient::captureException ( "std::exception", exc.what(), inMatch );
         stopDllMain ( string ( "Error: " ) + exc.what() );
     }
     catch ( ... )
     {
         LOG ( "Stopping due to unknown exception!" );
+        SentryClient::captureMessage ( SentryClient::Level::Fatal, "Unknown exception in DLL callback", inMatch );
         stopDllMain ( "Unknown error!" );
     }
 #endif // NDEBUG

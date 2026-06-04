@@ -96,7 +96,7 @@ CC_FLAGS = -m32 $(INCLUDES) $(DEFINES)
 CC_FLAGS += -mmmx -msse -msse2 -msse3 -mssse3
 
 # Linker flags
-LD_FLAGS = -m32 -static -lws2_32 -lpsapi -lwinpthread -lwinmm -lole32 -ldinput -lwininet -ldwmapi -lgdi32
+LD_FLAGS = -m32 -static -lws2_32 -lpsapi -lwinpthread -lwinmm -lole32 -ldinput -lwininet -ldwmapi -lgdi32 -ldbghelp
 
 # ----- Steamworks (optional Steam connection method) -----
 # Disabled unless STEAM_SDK is set to the 'public' dir of the Steamworks SDK, e.g.:
@@ -126,6 +126,17 @@ ifneq ($(STEAM_SDK),)
     STEAM_PKG_FOLDER = cp -f $(STEAM_DLL) $(FOLDER)/ && printf '411370' > $(FOLDER)/steam_appid.txt
 endif
 
+# ----- Sentry / Glitchtip crash reporting (optional) -----
+# Set SENTRY_DSN to your ingest DSN to enable crash/error reporting, e.g.:
+#   make SENTRY_DSN='https://<key>@glitchtip.example.com/1'
+# Empty (default) => the client is compiled in but disabled at runtime (no-op, no network), so
+# builds without a DSN are unaffected. Like the relay IPs, the DSN is baked into the binary; keep
+# real DSNs out of git (pass via CLI or source from .env). lib/SentryClient.cpp links into the main
+# exe + hook.dll automatically (lib/*.cpp wildcard); the launcher recipe pulls it in explicitly.
+SENTRY_DSN ?=
+SENTRY_DEFINE = -DSENTRY_DSN='"$(SENTRY_DSN)"'
+DEFINES += $(SENTRY_DEFINE)
+
 # Build options
 # DEFINES += -DDISABLE_LOGGING
 # DEFINES += -DDISABLE_ASSERTS
@@ -143,6 +154,17 @@ else
 	LOGGING_FLAGS = -s -Os -O2 -DLOGGING
 endif
 RELEASE_FLAGS = -s -Os -Ofast -fno-rtti -DNDEBUG -DRELEASE -DDISABLE_LOGGING -DDISABLE_ASSERTS
+
+# SYMBOLS=1 keeps DWARF debug info in the optimized logging build so Sentry/crash-report addresses
+# can be resolved with scripts/symbolicate.sh. It adds -ggdb (line info) and -fno-omit-frame-pointer
+# (clean StackWalk64 stacks), drops -s, and skips the strip step — WITHOUT pulling in the debug
+# build's -O0 or -D_GLIBCXX_DEBUG (which alter timing and abort on latent UB). Only affects logging;
+# scripts/build-steam.sh passes it by default. Release stays stripped.
+SYMBOLS ?= 0
+ifeq ($(SYMBOLS),1)
+	LOGGING_FLAGS := $(filter-out -s,$(LOGGING_FLAGS)) -ggdb -fno-omit-frame-pointer
+	STRIP = touch
+endif
 
 # Build type
 BUILD_TYPE = build_debug
@@ -205,8 +227,8 @@ $(FOLDER)/$(DLL): $(addprefix $(BUILD_PREFIX)/,$(DLL_OBJECTS)) res/rollback.o ta
 	$(STEAM_PKG_FOLDER)
 	@echo
 
-$(FOLDER)/$(LAUNCHER): tools/Launcher.cpp | $(FOLDER)
-	$(CXX) -o $@ $^ -m32 -s -Os -O2 -Wall -static -mwindows
+$(FOLDER)/$(LAUNCHER): tools/Launcher.cpp lib/SentryClient.cpp | $(FOLDER)
+	$(CXX) -o $@ $^ -m32 -s -Os -O2 -Wall -static -mwindows -I$(CURDIR)/lib -I$(CURDIR)/3rdparty/cereal/include $(SENTRY_DEFINE) -lwininet -ldbghelp
 	@echo
 	$(STRIP) $@
 	$(CHMOD_X)
