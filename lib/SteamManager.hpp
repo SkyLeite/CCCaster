@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <unordered_map>
 
 
@@ -37,6 +38,9 @@ public:
     // Local user's SteamID64 (0 if not initialized).
     uint64_t getSteamID() const;
 
+    // Local user's Steam persona (display) name; "" if not initialized.
+    std::string getPersonaName() const;
+
     // Whether the SDR relay network is ready (ping data current). ConnectP2P before this is
     // ready tends to fail, so callers should gate on it.
     bool isRelayNetworkReady() const;
@@ -60,32 +64,65 @@ public:
     uint64_t getConnectionPeer ( uint32_t conn ) const;
 
     // ---- lobby / matchmaking (driven by the launcher UI) ----
-    // Asynchronous; poll lobbyState() until Ready/Failed. SteamManager's pump runs the
+    // Asynchronous; poll the relevant *State() until Ready/Failed. SteamManager's pump runs the
     // underlying Steam callbacks, so the caller just needs to keep pumping the event loop.
     enum class LobbyState { Idle, Working, Ready, Failed };
 
-    // Host: create a searchable lobby and advertise a short join code + our SteamID.
-    // On Ready, lobbyCode() returns the code to share.
-    void hostLobby();
+    // Create a lobby and advertise a short join code + our SteamID. isPublic lobbies are returned
+    // by requestPublicLobbies(); non-public ("private") lobbies are excluded from browse but are
+    // still joinable by exact code. On Ready, lobbyCode() returns the code to share.
+    void createLobby ( bool isPublic );
 
-    // Client: find the lobby advertising the given code and resolve the host's SteamID.
-    // On Ready, lobbyPeerId() returns the host SteamID64 to ConnectP2P to.
+    // Client: find the lobby advertising the given code and JOIN it (membership). On Ready,
+    // joinedLobbyId() is valid and lobbyMembers() lists the occupants.
     void joinLobbyByCode ( const std::string& code );
+
+    // Join a specific lobby by id (e.g. one picked from the public browse list).
+    void joinLobbyById ( uint64_t lobbyId );
 
     void leaveLobby();
 
     LobbyState lobbyState() const { return _lobbyState; }
     const std::string& lobbyCode() const { return _lobbyCode; }
     uint64_t lobbyPeerId() const { return _lobbyPeerId; }
+    uint64_t joinedLobbyId() const { return _lobbyId; }
+    uint64_t lobbyOwnerId() const;
+
+    // ---- public lobby browse ----
+    struct LobbyInfo { uint64_t lobbyId; std::string code; int memberCount; };
+
+    void requestPublicLobbies();
+    LobbyState browseState() const { return _browseState; }
+    const std::vector<LobbyInfo>& publicLobbies() const { return _publicLobbies; }
+
+    // ---- members of the joined lobby ----
+    struct MemberInfo { uint64_t steamId; std::string name; uint64_t challengingTarget; uint64_t hostId; };
+
+    // Re-enumerate the current lobby's members (cheap; reads Steam's cached member data).
+    std::vector<MemberInfo> lobbyMembers();
+
+    // Advertise our display name to the lobby (so peers can list us by name).
+    void setLobbyMemberName ( const std::string& name );
+
+    // ---- challenge handshake (member-data based, no relay) ----
+    // Challenger advertises {challenging:<target>, host_id:<self>}; the target sees it on its next
+    // member refresh and connects as Client to our SteamID. clearChallenge() withdraws it.
+    void setChallenge ( uint64_t targetId );
+    void clearChallenge();
+    uint64_t myChallengeTarget() const { return _myChallenge; }
+
+    // ---- region matchmaking (create-or-join) ----
+    enum class MMState { Idle, Working, BecameHost, BecameClient, Failed };
+
+    void matchmakeRegion ( const std::string& region );
+    void cancelMatchmaking();
+    MMState mmState() const { return _mmState; }
+    uint64_t mmPeerId() const { return _mmPeerId; }
 
     // Run one manual-dispatch + message-drain cycle. Normally driven by the internal pump
     // timer once the EventManager loop is running, but callers (e.g. the lobby UI) can call
     // it directly in a wait loop when no EventManager loop is pumping yet.
     void pump();
-
-    // Called by the internal Steam callback shim (defined in the .cpp).
-    void onLobbyCreatedResult ( bool ok, uint64_t lobbyId );
-    void onLobbyListResult ( bool found, uint64_t lobbyId );
 
     // ---- routing registries (used by SteamSocket) ----
 
@@ -109,8 +146,13 @@ private:
     int _pipe = 0;
 
     // Pending async call-result ids (SteamAPICall_t) matched in the manual-dispatch pump.
-    uint64_t _lobbyCreateCall = 0;
-    uint64_t _lobbyListCall = 0;
+    uint64_t _lobbyCreateCall = 0;   // createLobby()
+    uint64_t _lobbyListCall = 0;     // joinLobbyByCode() code search
+    uint64_t _lobbyJoinCall = 0;     // JoinLobby() for the lobby path
+    uint64_t _browseListCall = 0;    // requestPublicLobbies()
+    uint64_t _mmListCall = 0;        // matchmakeRegion() search
+    uint64_t _mmCreateCall = 0;      // matchmakeRegion() create (host)
+    uint64_t _mmJoinCall = 0;        // matchmakeRegion() join (client)
 
     TimerPtr _pumpTimer;
 
@@ -119,14 +161,39 @@ private:
     std::string _lobbyCode;     // host's advertised code (valid when host + Ready)
     std::string _joinCode;      // code the client is searching for
     uint64_t _lobbyId = 0;      // current lobby (host or joined)
-    uint64_t _lobbyPeerId = 0;  // resolved host SteamID (valid when client + Ready)
+    uint64_t _lobbyPeerId = 0;  // resolved host SteamID (legacy 1v1; unused by the lobby path)
     bool _lobbyIsHost = false;
+    bool _lobbyIsPublic = true;
+    std::string _memberName;    // our display name, advertised on create/join
+    uint64_t _myChallenge = 0;  // who we are currently challenging (0 == none)
+
+    // Browse state
+    LobbyState _browseState = LobbyState::Idle;
+    std::vector<LobbyInfo> _publicLobbies;
+
+    // Matchmaking state
+    MMState _mmState = MMState::Idle;
+    std::string _mmRegion;
+    uint64_t _mmPeerId = 0;
 
     // conn handle -> the SteamSocket that owns it (client or accepted child)
     std::unordered_map<uint32_t, SteamSocket *> _connections;
 
     // listen handle -> the server SteamSocket that owns it
     std::unordered_map<uint32_t, SteamSocket *> _listeners;
+
+    // --- internal callback handlers (called from pump's manual dispatch) ---
+    void onLobbyCreatedResult ( bool ok, uint64_t lobbyId );
+    void onLobbyListResult ( bool found, uint64_t lobbyId );
+    void onBrowseListResult ( int count );
+    void onLobbyEntered ( uint64_t lobbyId, bool ok );
+    void onMatchmakeListResult ( int count );
+    void onMatchmakeCreated ( bool ok, uint64_t lobbyId );
+    void onMatchmakeEntered ( uint64_t lobbyId, bool ok );
+    void onMemberJoined ( uint64_t lobbyId, uint64_t memberId );
+
+    // Apply the lobby-data tags + our member name for a lobby we just created.
+    void tagLobby ( uint64_t lobbyId, const char *type );
 
     void startPump();
     void stopPump();

@@ -26,9 +26,17 @@ using namespace std;
 // Max messages drained per connection per pump (leftovers come next pump).
 #define RECV_BATCH ( 32 )
 
-// Lobby metadata keys: the shareable join code, and the host's SteamID64
-static const char *LOBBY_CODE_KEY = "cccaster_code";
-static const char *LOBBY_HOST_KEY = "host_id";
+// Lobby-level metadata keys.
+static const char *LOBBY_CODE_KEY   = "cccaster_code";   // shareable join code
+static const char *LOBBY_HOST_KEY   = "host_id";         // lobby owner's SteamID64
+static const char *LOBBY_TYPE_KEY   = "cccaster_type";   // "lobby" (browsable) / "private" / "mm"
+static const char *LOBBY_REGION_KEY = "cccaster_region"; // matchmaking region
+static const char *LOBBY_STATE_KEY  = "cccaster_state";  // matchmaking: "waiting" / "matched"
+
+// Per-member metadata keys.
+static const char *MEMBER_NAME_KEY  = "name";            // display name
+static const char *MEMBER_CHAL_KEY  = "challenging";     // SteamID64 this member is challenging
+static const char *MEMBER_HOST_KEY  = "host_id";         // challenger's own SteamID64 (Host side)
 
 // Route Steam diagnostics into our log file
 static void S_CALLTYPE steamNetDebugOutput ( ESteamNetworkingSocketsDebugOutputType type, const char *msg )
@@ -118,7 +126,8 @@ void SteamManager::deref()
     SteamAPI_Shutdown();
     _inited = false;
     _pipe = 0;
-    _lobbyCreateCall = _lobbyListCall = 0;
+    _lobbyCreateCall = _lobbyListCall = _lobbyJoinCall = _browseListCall = 0;
+    _mmListCall = _mmCreateCall = _mmJoinCall = 0;
 
     LOG ( "Steam shut down" );
 }
@@ -129,6 +138,15 @@ uint64_t SteamManager::getSteamID() const
         return 0;
 
     return SteamAPI_ISteamUser_GetSteamID ( SteamUser() );
+}
+
+std::string SteamManager::getPersonaName() const
+{
+    if ( ! _inited )
+        return "";
+
+    const char *n = SteamAPI_ISteamFriends_GetPersonaName ( SteamFriends() );
+    return n ? n : "";
 }
 
 bool SteamManager::isRelayNetworkReady() const
@@ -236,9 +254,23 @@ void SteamManager::unregisterListen ( uint32_t listenHandle )
 }
 
 
-// ---- lobby / matchmaking ----
+// ---- lobby ----
 
-void SteamManager::hostLobby()
+void SteamManager::tagLobby ( uint64_t lobbyId, const char *type )
+{
+    char selfId[32];
+    snprintf ( selfId, sizeof ( selfId ), "%llu", ( unsigned long long ) getSteamID() );
+
+    SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_TYPE_KEY, type );
+    SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_CODE_KEY, _lobbyCode.c_str() );
+    SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_HOST_KEY, selfId );
+
+    if ( ! _memberName.empty() )
+        SteamAPI_ISteamMatchmaking_SetLobbyMemberData ( SteamMatchmaking(), lobbyId, MEMBER_NAME_KEY,
+                                                        _memberName.c_str() );
+}
+
+void SteamManager::createLobby ( bool isPublic )
 {
     if ( ! _inited )
     {
@@ -247,12 +279,15 @@ void SteamManager::hostLobby()
     }
 
     _lobbyIsHost = true;
+    _lobbyIsPublic = isPublic;
     _lobbyState = LobbyState::Working;
     _lobbyCode.clear();
     _lobbyId = 0;
+    _myChallenge = 0;
 
-    // Result matched by id in pump()
-    _lobbyCreateCall = SteamAPI_ISteamMatchmaking_CreateLobby ( SteamMatchmaking(), k_ELobbyTypePublic, 2 );
+    // Both public and "private" lobbies are Steam-level public so that exact-code RequestLobbyList
+    // can find them; privacy is enforced by the cccaster_type tag (browse only asks for "lobby").
+    _lobbyCreateCall = SteamAPI_ISteamMatchmaking_CreateLobby ( SteamMatchmaking(), k_ELobbyTypePublic, 8 );
 }
 
 void SteamManager::onLobbyCreatedResult ( bool ok, uint64_t lobbyId )
@@ -269,14 +304,10 @@ void SteamManager::onLobbyCreatedResult ( bool ok, uint64_t lobbyId )
     if ( _lobbyCode.empty() )
         _lobbyCode = makeLobbyCode();
 
-    char hostId[32];
-    snprintf ( hostId, sizeof ( hostId ), "%llu", ( unsigned long long ) getSteamID() );
-
-    SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_CODE_KEY, _lobbyCode.c_str() );
-    SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_HOST_KEY, hostId );
+    tagLobby ( lobbyId, _lobbyIsPublic ? "lobby" : "private" );
 
     _lobbyState = LobbyState::Ready;
-    LOG ( "Lobby ready; code=%s", _lobbyCode.c_str() );
+    LOG ( "Lobby ready; code=%s public=%d", _lobbyCode.c_str(), ( int ) _lobbyIsPublic );
 }
 
 void SteamManager::joinLobbyByCode ( const std::string& code )
@@ -290,6 +321,8 @@ void SteamManager::joinLobbyByCode ( const std::string& code )
     _lobbyIsHost = false;
     _joinCode = code;
     _lobbyPeerId = 0;
+    _lobbyId = 0;
+    _myChallenge = 0;
     _lobbyState = LobbyState::Working;
 
     SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter (
@@ -309,20 +342,153 @@ void SteamManager::onLobbyListResult ( bool found, uint64_t lobbyId )
         return;
     }
 
-    _lobbyId = lobbyId;
+    // Found the lobby advertising the code; join it for membership (the lobby UI lists members
+    // and issues challenges; it does not connect P2P directly here).
+    joinLobbyById ( lobbyId );
+}
 
-    const char *hostId = SteamAPI_ISteamMatchmaking_GetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_HOST_KEY );
-    _lobbyPeerId = ( hostId && hostId[0] ) ? strtoull ( hostId, nullptr, 10 ) : 0;
-
-    if ( _lobbyPeerId == 0 )
+void SteamManager::joinLobbyById ( uint64_t lobbyId )
+{
+    if ( ! _inited || ! lobbyId )
     {
-        LOG ( "Lobby found but host_id missing" );
         _lobbyState = LobbyState::Failed;
         return;
     }
 
+    _lobbyIsHost = false;
+    _myChallenge = 0;
+    _lobbyState = LobbyState::Working;
+
+    _lobbyJoinCall = SteamAPI_ISteamMatchmaking_JoinLobby ( SteamMatchmaking(), lobbyId );
+}
+
+void SteamManager::onLobbyEntered ( uint64_t lobbyId, bool ok )
+{
+    if ( ! ok )
+    {
+        LOG ( "JoinLobby failed" );
+        _lobbyState = LobbyState::Failed;
+        return;
+    }
+
+    _lobbyId = lobbyId;
+
+    if ( ! _memberName.empty() )
+        SteamAPI_ISteamMatchmaking_SetLobbyMemberData ( SteamMatchmaking(), lobbyId, MEMBER_NAME_KEY,
+                                                        _memberName.c_str() );
+
     _lobbyState = LobbyState::Ready;
-    LOG ( "Joined lobby; host=%llu", ( unsigned long long ) _lobbyPeerId );
+    LOG ( "Entered lobby %llu", ( unsigned long long ) lobbyId );
+}
+
+void SteamManager::requestPublicLobbies()
+{
+    if ( ! _inited )
+    {
+        _browseState = LobbyState::Failed;
+        return;
+    }
+
+    _browseState = LobbyState::Working;
+    _publicLobbies.clear();
+
+    SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter (
+        SteamMatchmaking(), LOBBY_TYPE_KEY, "lobby", k_ELobbyComparisonEqual );
+    SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter (
+        SteamMatchmaking(), k_ELobbyDistanceFilterWorldwide );
+
+    _browseListCall = SteamAPI_ISteamMatchmaking_RequestLobbyList ( SteamMatchmaking() );
+}
+
+void SteamManager::onBrowseListResult ( int count )
+{
+    _publicLobbies.clear();
+
+    for ( int i = 0; i < count; ++i )
+    {
+        const uint64_t id = SteamAPI_ISteamMatchmaking_GetLobbyByIndex ( SteamMatchmaking(), i );
+        const char *code = SteamAPI_ISteamMatchmaking_GetLobbyData ( SteamMatchmaking(), id, LOBBY_CODE_KEY );
+        const int cnt = SteamAPI_ISteamMatchmaking_GetNumLobbyMembers ( SteamMatchmaking(), id );
+        _publicLobbies.push_back ( { id, code ? code : "", cnt } );
+    }
+
+    _browseState = LobbyState::Ready;
+    LOG ( "Browse: %d public lobbies", ( int ) _publicLobbies.size() );
+}
+
+uint64_t SteamManager::lobbyOwnerId() const
+{
+    if ( ! _inited || ! _lobbyId )
+        return 0;
+
+    return SteamAPI_ISteamMatchmaking_GetLobbyOwner ( SteamMatchmaking(), _lobbyId );
+}
+
+std::vector<SteamManager::MemberInfo> SteamManager::lobbyMembers()
+{
+    std::vector<MemberInfo> out;
+
+    if ( ! _inited || ! _lobbyId )
+        return out;
+
+    const int n = SteamAPI_ISteamMatchmaking_GetNumLobbyMembers ( SteamMatchmaking(), _lobbyId );
+
+    for ( int i = 0; i < n; ++i )
+    {
+        const uint64_t mid = SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex ( SteamMatchmaking(), _lobbyId, i );
+
+        const char *nm  = SteamAPI_ISteamMatchmaking_GetLobbyMemberData ( SteamMatchmaking(), _lobbyId, mid, MEMBER_NAME_KEY );
+        const char *chl = SteamAPI_ISteamMatchmaking_GetLobbyMemberData ( SteamMatchmaking(), _lobbyId, mid, MEMBER_CHAL_KEY );
+        const char *hid = SteamAPI_ISteamMatchmaking_GetLobbyMemberData ( SteamMatchmaking(), _lobbyId, mid, MEMBER_HOST_KEY );
+
+        std::string name = ( nm && nm[0] ) ? nm : "";
+        if ( name.empty() )
+        {
+            const char *pn = SteamAPI_ISteamFriends_GetFriendPersonaName ( SteamFriends(), mid );
+            name = ( pn ? pn : "" );
+        }
+
+        const uint64_t chalTarget = ( chl && chl[0] ) ? strtoull ( chl, nullptr, 10 ) : 0;
+        const uint64_t hostId     = ( hid && hid[0] ) ? strtoull ( hid, nullptr, 10 ) : 0;
+
+        out.push_back ( { mid, name, chalTarget, hostId } );
+    }
+
+    return out;
+}
+
+void SteamManager::setLobbyMemberName ( const std::string& name )
+{
+    _memberName = name;
+
+    if ( _inited && _lobbyId )
+        SteamAPI_ISteamMatchmaking_SetLobbyMemberData ( SteamMatchmaking(), _lobbyId, MEMBER_NAME_KEY, name.c_str() );
+}
+
+void SteamManager::setChallenge ( uint64_t targetId )
+{
+    if ( ! _inited || ! _lobbyId )
+        return;
+
+    _myChallenge = targetId;
+
+    char target[32], self[32];
+    snprintf ( target, sizeof ( target ), "%llu", ( unsigned long long ) targetId );
+    snprintf ( self, sizeof ( self ), "%llu", ( unsigned long long ) getSteamID() );
+
+    SteamAPI_ISteamMatchmaking_SetLobbyMemberData ( SteamMatchmaking(), _lobbyId, MEMBER_CHAL_KEY, target );
+    SteamAPI_ISteamMatchmaking_SetLobbyMemberData ( SteamMatchmaking(), _lobbyId, MEMBER_HOST_KEY, self );
+}
+
+void SteamManager::clearChallenge()
+{
+    _myChallenge = 0;
+
+    if ( ! _inited || ! _lobbyId )
+        return;
+
+    SteamAPI_ISteamMatchmaking_SetLobbyMemberData ( SteamMatchmaking(), _lobbyId, MEMBER_CHAL_KEY, "" );
+    SteamAPI_ISteamMatchmaking_SetLobbyMemberData ( SteamMatchmaking(), _lobbyId, MEMBER_HOST_KEY, "" );
 }
 
 void SteamManager::leaveLobby()
@@ -334,6 +500,119 @@ void SteamManager::leaveLobby()
     _lobbyPeerId = 0;
     _lobbyCode.clear();
     _lobbyState = LobbyState::Idle;
+    _browseState = LobbyState::Idle;
+    _publicLobbies.clear();
+    _myChallenge = 0;
+}
+
+
+// ---- region matchmaking (create-or-join) ----
+
+void SteamManager::matchmakeRegion ( const std::string& region )
+{
+    if ( ! _inited )
+    {
+        _mmState = MMState::Failed;
+        return;
+    }
+
+    _mmRegion = region;
+    _mmPeerId = 0;
+    _mmState = MMState::Working;
+    _lobbyId = 0;
+
+    SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter (
+        SteamMatchmaking(), LOBBY_TYPE_KEY, "mm", k_ELobbyComparisonEqual );
+    SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter (
+        SteamMatchmaking(), LOBBY_REGION_KEY, region.c_str(), k_ELobbyComparisonEqual );
+    SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter (
+        SteamMatchmaking(), LOBBY_STATE_KEY, "waiting", k_ELobbyComparisonEqual );
+    SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter ( SteamMatchmaking(), 1 );
+
+    _mmListCall = SteamAPI_ISteamMatchmaking_RequestLobbyList ( SteamMatchmaking() );
+}
+
+void SteamManager::onMatchmakeListResult ( int count )
+{
+    if ( count > 0 )
+    {
+        // A peer is already waiting in this region; join as Client.
+        const uint64_t id = SteamAPI_ISteamMatchmaking_GetLobbyByIndex ( SteamMatchmaking(), 0 );
+        _mmJoinCall = SteamAPI_ISteamMatchmaking_JoinLobby ( SteamMatchmaking(), id );
+    }
+    else
+    {
+        // Nobody waiting; create a waiting lobby and become Host.
+        _mmCreateCall = SteamAPI_ISteamMatchmaking_CreateLobby ( SteamMatchmaking(), k_ELobbyTypePublic, 2 );
+    }
+}
+
+void SteamManager::onMatchmakeCreated ( bool ok, uint64_t lobbyId )
+{
+    if ( ! ok )
+    {
+        _mmState = MMState::Failed;
+        return;
+    }
+
+    _lobbyId = lobbyId;
+
+    char selfId[32];
+    snprintf ( selfId, sizeof ( selfId ), "%llu", ( unsigned long long ) getSteamID() );
+
+    SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_TYPE_KEY, "mm" );
+    SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_REGION_KEY, _mmRegion.c_str() );
+    SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_STATE_KEY, "waiting" );
+    SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_HOST_KEY, selfId );
+
+    // Stay Working; a joining peer triggers onMemberJoined -> BecameHost.
+    LOG ( "Matchmaking: created waiting lobby in region %s", _mmRegion.c_str() );
+}
+
+void SteamManager::onMatchmakeEntered ( uint64_t lobbyId, bool ok )
+{
+    if ( ! ok )
+    {
+        _mmState = MMState::Failed;
+        return;
+    }
+
+    _lobbyId = lobbyId;
+    _mmPeerId = SteamAPI_ISteamMatchmaking_GetLobbyOwner ( SteamMatchmaking(), lobbyId );
+
+    if ( _mmPeerId == 0 )
+    {
+        _mmState = MMState::Failed;
+        return;
+    }
+
+    _mmState = MMState::BecameClient;
+    LOG ( "Matchmaking: joined region %s; host=%llu", _mmRegion.c_str(), ( unsigned long long ) _mmPeerId );
+}
+
+void SteamManager::onMemberJoined ( uint64_t lobbyId, uint64_t memberId )
+{
+    if ( lobbyId != _lobbyId )
+        return;
+
+    // Matchmaking host: a peer joined our waiting lobby -> we are matched as Host.
+    if ( _mmState == MMState::Working && memberId != 0 && memberId != getSteamID() )
+    {
+        _mmPeerId = memberId;
+        SteamAPI_ISteamMatchmaking_SetLobbyData ( SteamMatchmaking(), lobbyId, LOBBY_STATE_KEY, "matched" );
+        _mmState = MMState::BecameHost;
+        LOG ( "Matchmaking: peer %llu joined; we host", ( unsigned long long ) memberId );
+    }
+}
+
+void SteamManager::cancelMatchmaking()
+{
+    if ( _inited && _lobbyId )
+        SteamAPI_ISteamMatchmaking_LeaveLobby ( SteamMatchmaking(), _lobbyId );
+
+    _lobbyId = 0;
+    _mmState = MMState::Idle;
+    _mmPeerId = 0;
 }
 
 
@@ -420,7 +699,7 @@ void SteamManager::pump()
     {
         if ( cb.m_iCallback == SteamAPICallCompleted_t::k_iCallback )
         {
-            // Async call result (CreateLobby / RequestLobbyList)
+            // Async call result (CreateLobby / RequestLobbyList / JoinLobby), matched by call id.
             const SteamAPICallCompleted_t *cc = ( const SteamAPICallCompleted_t * ) cb.m_pubParam;
             void *result = malloc ( cc->m_cubParam );
             bool failed = false;
@@ -428,20 +707,54 @@ void SteamManager::pump()
             if ( result && SteamAPI_ManualDispatch_GetAPICallResult (
                      _pipe, cc->m_hAsyncCall, result, cc->m_cubParam, cc->m_iCallback, &failed ) )
             {
-                if ( _lobbyCreateCall && cc->m_hAsyncCall == _lobbyCreateCall )
+                const uint64_t call = cc->m_hAsyncCall;
+
+                if ( _lobbyCreateCall && call == _lobbyCreateCall )
                 {
                     const LobbyCreated_t *r = ( const LobbyCreated_t * ) result;
                     _lobbyCreateCall = 0;
                     onLobbyCreatedResult ( ( ! failed && r->m_eResult == k_EResultOK ), r->m_ulSteamIDLobby );
                 }
-                else if ( _lobbyListCall && cc->m_hAsyncCall == _lobbyListCall )
+                else if ( _lobbyListCall && call == _lobbyListCall )
                 {
                     const LobbyMatchList_t *r = ( const LobbyMatchList_t * ) result;
                     _lobbyListCall = 0;
                     const bool found = ( ! failed && r->m_nLobbiesMatching > 0 );
-                    const uint64 lobbyId =
+                    const uint64_t id =
                         found ? SteamAPI_ISteamMatchmaking_GetLobbyByIndex ( SteamMatchmaking(), 0 ) : 0;
-                    onLobbyListResult ( found, lobbyId );
+                    onLobbyListResult ( found, id );
+                }
+                else if ( _browseListCall && call == _browseListCall )
+                {
+                    const LobbyMatchList_t *r = ( const LobbyMatchList_t * ) result;
+                    _browseListCall = 0;
+                    onBrowseListResult ( failed ? 0 : ( int ) r->m_nLobbiesMatching );
+                }
+                else if ( _lobbyJoinCall && call == _lobbyJoinCall )
+                {
+                    const LobbyEnter_t *r = ( const LobbyEnter_t * ) result;
+                    _lobbyJoinCall = 0;
+                    onLobbyEntered ( r->m_ulSteamIDLobby,
+                                     ( ! failed && r->m_EChatRoomEnterResponse == k_EChatRoomEnterResponseSuccess ) );
+                }
+                else if ( _mmListCall && call == _mmListCall )
+                {
+                    const LobbyMatchList_t *r = ( const LobbyMatchList_t * ) result;
+                    _mmListCall = 0;
+                    onMatchmakeListResult ( failed ? 0 : ( int ) r->m_nLobbiesMatching );
+                }
+                else if ( _mmCreateCall && call == _mmCreateCall )
+                {
+                    const LobbyCreated_t *r = ( const LobbyCreated_t * ) result;
+                    _mmCreateCall = 0;
+                    onMatchmakeCreated ( ( ! failed && r->m_eResult == k_EResultOK ), r->m_ulSteamIDLobby );
+                }
+                else if ( _mmJoinCall && call == _mmJoinCall )
+                {
+                    const LobbyEnter_t *r = ( const LobbyEnter_t * ) result;
+                    _mmJoinCall = 0;
+                    onMatchmakeEntered ( r->m_ulSteamIDLobby,
+                                         ( ! failed && r->m_EChatRoomEnterResponse == k_EChatRoomEnterResponseSuccess ) );
                 }
             }
 
@@ -455,6 +768,17 @@ void SteamManager::pump()
                                         ( int ) p->m_info.m_eState,
                                         p->m_info.m_identityRemote.GetSteamID64() );
         }
+        else if ( cb.m_iCallback == LobbyChatUpdate_t::k_iCallback )
+        {
+            // Member entered/left the lobby. Used to detect a peer joining a matchmaking lobby
+            // (host side); the lobby member list re-reads on the UI's periodic refresh anyway.
+            const LobbyChatUpdate_t *p = ( const LobbyChatUpdate_t * ) cb.m_pubParam;
+            if ( p->m_rgfChatMemberStateChange & k_EChatMemberStateChangeEntered )
+                onMemberJoined ( p->m_ulSteamIDLobby, p->m_ulSteamIDUserChanged );
+        }
+        // LobbyDataUpdate_t / LobbyChatMsg_t: Steam keeps the member-data cache current
+        // automatically, so the periodic lobbyMembers() refresh sees the latest values; no
+        // explicit handling needed.
 
         SteamAPI_ManualDispatch_FreeLastCallback ( _pipe );
     }

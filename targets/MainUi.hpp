@@ -6,8 +6,8 @@
 #include "ControllerManager.hpp"
 #include "KeyValueStore.hpp"
 #include "MainUpdater.hpp"
-#include "Lobby.hpp"
-#include "MatchmakingManager.hpp"
+#include "ILobbyBackend.hpp"
+#include "IMatchmakingBackend.hpp"
 
 #include <string>
 #include <memory>
@@ -30,8 +30,8 @@ class MainUi
     : private Controller::Owner
     , private ControllerManager::Owner
     , private MainUpdater::Owner
-    , private Lobby::Owner
-    , private MatchmakingManager::Owner
+    , private ILobbyBackend::Owner
+    , private IMatchmakingBackend::Owner
 {
 public:
 
@@ -81,9 +81,9 @@ private:
 
     std::shared_ptr<ConsoleUi> _ui;
 
-    std::shared_ptr<Lobby> _lobby;
+    std::shared_ptr<ILobbyBackend> _lobby;
 
-    std::shared_ptr<MatchmakingManager> _mmm;
+    std::shared_ptr<IMatchmakingBackend> _mmm;
 
     MainUpdater _updater;
 
@@ -104,7 +104,6 @@ private:
     bool isMatchmaking = false;
 
     void netplay ( RunFuncPtr run );
-    void steam ( RunFuncPtr run );
     void server ( RunFuncPtr run );
     void lobby ( RunFuncPtr run );
     void matchmaking ( RunFuncPtr run );
@@ -151,12 +150,12 @@ private:
 
     void fetchProgress ( MainUpdater *updater, const MainUpdater::Type& type, double progress ) override;
 
-    void connectionFailed ( Lobby *lobby );
-    void unlock ( Lobby *lobby );
+    void connectionFailed ( ILobbyBackend *lobby ) override;
+    void unlock ( ILobbyBackend *lobby ) override;
 
-    void connectionFailed( MatchmakingManager* lobby );
-    void setAddr( MatchmakingManager* lobby, std::string addr );
-    void setMode( MatchmakingManager* lobby, std::string mode );
-    void unlock( MatchmakingManager* lobby );
+    void connectionFailed( IMatchmakingBackend* lobby ) override;
+    void setAddr( IMatchmakingBackend* lobby, std::string addr ) override;
+    void setMode( IMatchmakingBackend* lobby, std::string mode ) override;
+    void unlock( IMatchmakingBackend* lobby ) override;
 
 };
