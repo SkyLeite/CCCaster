@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <iomanip>
+#include <fstream>
 #include <mmsystem.h>
 #include <wininet.h>
 
@@ -2202,7 +2203,9 @@ string MainUi::getUpdate ( bool isStartup )
         return "Cannot fetch info for " + _updater.getTargetDescName() + " version";
     }
 
-    if ( LocalVersion.isSimilar ( _updater.getTargetVersion(), ( _config.getInteger("updateChannel") - 1 ) ? 3 : 2 ) )
+    // Tag-only comparison: GitHub release tags carry no revision/buildTime, so both channels
+    // compare at suffix level (2). The channel still drives prerelease filtering in MainUpdater.
+    if ( LocalVersion.isSimilar ( _updater.getTargetVersion(), 2 ) )
     {
         _upToDate = true;
         if ( ! isStartup )
