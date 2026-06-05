@@ -1,6 +1,10 @@
-# Full version code derived from the nearest reachable git tag (leading 'v' stripped).
-# Falls back to a literal when no tag is reachable (e.g. a source export with no git history).
-GIT_VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
+# Full version code derived from a git tag (leading 'v' stripped).
+# When several tags share the HEAD commit (e.g. v4.0 and v4.0.1), prefer the HIGHEST version
+# rather than whatever `git describe` happens to pick first. Fall back to the nearest reachable
+# tag, then to a literal when no tag is reachable (e.g. a source export with no git history).
+GIT_TAG := $(shell git tag --points-at HEAD --sort=-v:refname 2>/dev/null | head -n1)
+GIT_TAG := $(or $(GIT_TAG),$(shell git describe --tags --abbrev=0 2>/dev/null))
+GIT_VERSION := $(patsubst v%,%,$(GIT_TAG))
 FULL_VERSION := $(or $(GIT_VERSION),3.1.007)
 
 # major.minor: drives the binary/archive filenames and netplay-compat comparison
