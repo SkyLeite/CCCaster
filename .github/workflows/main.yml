@@ -30,6 +30,10 @@ jobs:
         with:
           # imgui + SteamworksSDK are git submodules; recursive pulls both.
           submodules: recursive
+          # Full history + tags so the Makefile's `git describe` can resolve the
+          # nearest tag to derive the baked-in version (not just on tag pushes).
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up MSYS2 (MINGW32 / i686)
         uses: msys2/setup-msys2@v2

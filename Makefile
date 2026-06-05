@@ -1,5 +1,12 @@
-VERSION = 3.1
-SUFFIX = .007
+# Full version code derived from the nearest reachable git tag (leading 'v' stripped).
+# Falls back to a literal when no tag is reachable (e.g. a source export with no git history).
+GIT_VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
+FULL_VERSION := $(or $(GIT_VERSION),3.1.007)
+
+# major.minor: drives the binary/archive filenames and netplay-compat comparison
+VERSION := $(shell echo '$(FULL_VERSION)' | cut -d. -f1,2)
+# remaining patch part, with its leading dot (empty for tags like v2.1e)
+SUFFIX := $(patsubst $(VERSION)%,%,$(FULL_VERSION))
 NAME = cccaster
 TAG =
 BRANCH := $(shell git rev-parse --abbrev-ref HEAD)
