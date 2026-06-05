@@ -97,7 +97,9 @@ DEFINES += -DLOBBY_LIST='"$(LOBBY_LIST)"'
 INCLUDES = -I$(CURDIR) -I$(CURDIR)/netplay -I$(CURDIR)/lib -I$(CURDIR)/tests -I$(CURDIR)/3rdparty -I$(CURDIR)/sequences
 INCLUDES += -I$(CURDIR)/3rdparty/cereal/include -I$(CURDIR)/3rdparty/gtest/include -I$(CURDIR)/3rdparty/minhook/include
 INCLUDES += -I$(CURDIR)/3rdparty/d3dhook -I$(CURDIR)/3rdparty/framedisplay -I$(CURDIR)/3rdparty/imgui -I$(CURDIR)/3rdparty/imgui/backends
-CC_FLAGS = -m32 $(INCLUDES) $(DEFINES)
+# -include cstdint: some libstdc++ versions (e.g. CI's MSYS2 toolchain) don't transitively
+# pull in <cstdint>, so force it into every TU rather than fixing ~95 missing includes by hand.
+CC_FLAGS = -m32 -include cstdint $(INCLUDES) $(DEFINES)
 #	https://gcc.gnu.org/onlinedocs/gcc/x86-Options.html
 # 	Intel Celeron 440 is listed as minimum CPU for melty on steam
 CC_FLAGS += -mmmx -msse -msse2 -msse3 -mssse3
