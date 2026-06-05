@@ -55,20 +55,53 @@ jobs:
           # The Makefile hardcodes the toolchain prefix as ../mingw32/bin/i686-w64-mingw32-*
           # (a symlink to the MSYS2 mingw32 tree on the dev's machine). Reproduce that layout.
           ln -sfn /mingw32 ../mingw32
+          # actions/checkout only marks the workdir safe for the *Windows* git; the MSYS2 git used
+          # by the Makefile has its own config and otherwise refuses the repo ("dubious ownership"),
+          # which makes make_version's `git rev-parse`/`git status` return empty (baking a bogus
+          # version + bare "-custom" revision). Trust the workdir for the MSYS2 git too.
+          git config --global --add safe.directory "$(pwd)" || true
           # MSYS2's recipe shell can blank TMP/TEMP, making native gcc/collect2 fall back to a
           # non-writable C:\WINDOWS temp. Wrap the recipe shell to force a writable temp — same
           # fix as scripts/build-steam.sh.
           printf '%s\n' '#!/usr/bin/sh' 'export TMPDIR=/tmp TMP=/tmp TEMP=/tmp' 'shift' 'eval "$@"' > /tmp/recipe-shell.sh
           chmod +x /tmp/recipe-shell.sh
+          # On a tag build, pin the version straight from the tag (e.g. v4.1.0 -> 4.1.0). This is
+          # the authoritative source for a release and makes the baked-in version deterministic,
+          # independent of how `git describe` resolves inside the recursive make on the runner.
+          version_arg=
+          case "${GITHUB_REF:-}" in
+            refs/tags/v*) version_arg="FULL_VERSION=${GITHUB_REF_NAME#v}" ;;
+          esac
           # STEAM_SDK enables -DENABLE_STEAM and links the 32-bit steam_api import lib; the
           # resulting zip bundles steam_api.dll + steam_appid.txt via the Makefile's STEAM_PKG_*
           # hooks. CHMOD_X/GRANT are no-oped to skip per-file icacls calls (not needed in CI).
           make release \
+            $version_arg \
             STEAM_SDK=3rdparty/SteamworksSDK/public \
             OS=Windows_NT \
             SHELL=/tmp/recipe-shell.sh \
             CHMOD_X=true GRANT=true \
             -j "$(nproc)"
+
+      - name: Verify baked version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          zip="cccaster.v${ver}.zip"
+          if [ ! -f "$zip" ]; then
+            echo "::error::expected archive $zip not produced (got: $(ls cccaster.v*.zip 2>/dev/null))"
+            exit 1
+          fi
+          # The standalone exe is named by major.minor; assert the full tag version is actually
+          # compiled into it, so a mis-derived version can never be shipped to the update channel.
+          exe="cccaster.v$(echo "$ver" | cut -d. -f1,2).exe"
+          unzip -p "$zip" "$exe" > /tmp/release-exe
+          if ! grep -aqF "$ver" /tmp/release-exe; then
+            echo "::error::$exe in $zip does not embed version '$ver' (baked version mismatch)"
+            exit 1
+          fi
+          echo "OK: $zip embeds version $ver"
 
       - name: Stage artifact
         run: |
@@ -126,7 +159,7 @@ jobs:
           echo "----- generated notes -----"
           cat RELEASE_NOTES.md
 
-      - name: Create draft release
+      - name: Create or update draft release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -139,8 +172,16 @@ jobs:
             exit 1
           fi
           echo "Attaching: ${assets[*]}"
-          gh release create "${tag}" \
-            --draft \
-            --title "${tag}" \
-            --notes-file RELEASE_NOTES.md \
-            "${assets[@]}"
+          # Idempotent: if a re-run (or re-pushed tag) finds the release already exists, replace its
+          # asset with --clobber instead of failing on `gh release create`, so the published asset
+          # always reflects the latest build for this tag.
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${assets[@]}" --clobber
+            gh release edit "${tag}" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "${tag}" \
+              --draft \
+              --title "${tag}" \
+              --notes-file RELEASE_NOTES.md \
+              "${assets[@]}"
+          fi
