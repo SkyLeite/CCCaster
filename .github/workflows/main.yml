@@ -67,7 +67,8 @@ jobs:
             STEAM_SDK=3rdparty/SteamworksSDK/public \
             OS=Windows_NT \
             SHELL=/tmp/recipe-shell.sh \
-            CHMOD_X=true GRANT=true
+            CHMOD_X=true GRANT=true \
+            -j "$(nproc)"
 
       - name: Stage artifact
         run: |
