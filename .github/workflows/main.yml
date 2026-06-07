@@ -93,15 +93,19 @@ jobs:
             echo "::error::expected archive $zip not produced (got: $(ls cccaster.v*.zip 2>/dev/null))"
             exit 1
           fi
-          # The standalone exe is named by major.minor; assert the full tag version is actually
-          # compiled into it, so a mis-derived version can never be shipped to the update channel.
+          # The standalone exe (named by major.minor) is the exact file that gets zipped; assert the
+          # full tag version is actually compiled into it, so a mis-derived version can never reach
+          # the update channel. Check the built exe directly (no unzip dependency on the runner).
           exe="cccaster.v$(echo "$ver" | cut -d. -f1,2).exe"
-          unzip -p "$zip" "$exe" > /tmp/release-exe
-          if ! grep -aqF "$ver" /tmp/release-exe; then
-            echo "::error::$exe in $zip does not embed version '$ver' (baked version mismatch)"
+          if [ ! -f "$exe" ]; then
+            echo "::error::expected built exe $exe not found"
             exit 1
           fi
-          echo "OK: $zip embeds version $ver"
+          if ! grep -aqF "$ver" "$exe"; then
+            echo "::error::$exe does not embed version '$ver' (baked version mismatch)"
+            exit 1
+          fi
+          echo "OK: $zip / $exe embed version $ver"
 
       - name: Stage artifact
         run: |
