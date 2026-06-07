@@ -50,6 +50,11 @@ jobs:
             mingw-w64-i686-toolchain
 
       - name: Build Steam release
+        env:
+          # Inject the tag version from the Actions *context* (not the shell). github.ref_name is
+          # resolved by the runner before the step runs, so it can't be lost the way an unexported
+          # $GITHUB_REF inside the msys2 shell can. Empty on non-tag builds.
+          TAG_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: |
           set -euo pipefail
           # The Makefile hardcodes the toolchain prefix as ../mingw32/bin/i686-w64-mingw32-*
@@ -65,13 +70,14 @@ jobs:
           # fix as scripts/build-steam.sh.
           printf '%s\n' '#!/usr/bin/sh' 'export TMPDIR=/tmp TMP=/tmp TEMP=/tmp' 'shift' 'eval "$@"' > /tmp/recipe-shell.sh
           chmod +x /tmp/recipe-shell.sh
-          # On a tag build, pin the version straight from the tag (e.g. v4.1.0 -> 4.1.0). This is
-          # the authoritative source for a release and makes the baked-in version deterministic,
-          # independent of how `git describe` resolves inside the recursive make on the runner.
+          # On a tag build, pin the version straight from the tag (e.g. v4.1.0 -> 4.1.0). Passing
+          # FULL_VERSION makes the baked-in version deterministic and bypasses git-in-make entirely,
+          # so a flaky git on the runner can't produce a version that mismatches the tag.
           version_arg=
-          case "${GITHUB_REF:-}" in
-            refs/tags/v*) version_arg="FULL_VERSION=${GITHUB_REF_NAME#v}" ;;
-          esac
+          if [ -n "${TAG_VERSION:-}" ]; then
+            version_arg="FULL_VERSION=${TAG_VERSION#v}"
+            echo "Pinning release version: ${version_arg}"
+          fi
           # STEAM_SDK enables -DENABLE_STEAM and links the 32-bit steam_api import lib; the
           # resulting zip bundles steam_api.dll + steam_appid.txt via the Makefile's STEAM_PKG_*
           # hooks. CHMOD_X/GRANT are no-oped to skip per-file icacls calls (not needed in CI).
@@ -82,6 +88,9 @@ jobs:
             SHELL=/tmp/recipe-shell.sh \
             CHMOD_X=true GRANT=true \
             -j "$(nproc)"
+          # Diagnostic: show exactly what version got baked in, so any future mismatch is obvious.
+          echo "=== generated lib/Version.local.hpp ==="
+          cat lib/Version.local.hpp || true
 
       - name: Verify baked version matches tag
         if: startsWith(github.ref, 'refs/tags/v')
