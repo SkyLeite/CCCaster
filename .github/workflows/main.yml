@@ -10,15 +10,11 @@ on:
     branches: [ master ]
   workflow_dispatch:
 
-# Default to read-only; the release job opts into write below.
 permissions:
   contents: read
 
 jobs:
   # ------------------------------------------------------------------ build
-  # Builds the Steam-enabled release zip on a Windows runner using the same
-  # 32-bit MSYS2/MinGW toolchain the project builds with locally, then uploads
-  # the zip as a workflow artifact (persisted on every commit).
   build:
     runs-on: windows-latest
     defaults:
@@ -28,10 +24,7 @@ jobs:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
-          # imgui + SteamworksSDK are git submodules; recursive pulls both.
           submodules: recursive
-          # Full history + tags so the Makefile's `git describe` can resolve the
-          # nearest tag to derive the baked-in version (not just on tag pushes).
           fetch-depth: 0
           fetch-tags: true
 
@@ -40,8 +33,6 @@ jobs:
         with:
           msystem: MINGW32
           update: true
-          # mingw-w64-i686-toolchain provides i686-w64-mingw32-{gcc,g++}, windres,
-          # strip, objcopy and the d3dx9 import lib needed to link hook.dll.
           install: >-
             make
             rsync
@@ -51,9 +42,6 @@ jobs:
 
       - name: Build Steam release
         env:
-          # Inject the tag version from the Actions *context* (not the shell). github.ref_name is
-          # resolved by the runner before the step runs, so it can't be lost the way an unexported
-          # $GITHUB_REF inside the msys2 shell can. Empty on non-tag builds.
           TAG_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: |
           set -euo pipefail
