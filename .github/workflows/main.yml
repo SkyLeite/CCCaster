@@ -90,20 +90,26 @@ jobs:
             echo "::error::expected archive $zip not produced (got: $(ls cccaster.v*.zip 2>/dev/null))"
             exit 1
           fi
-          # The zip's existence already proves the Makefile derived the right major.minor+suffix
-          # (ARCHIVE is named from VERSION+SUFFIX). The remaining risk is the *runtime* version
-          # string: LocalVersion.code, which feeds the update channel, is generated into
-          # lib/Version.local.hpp by scripts/make_version from that same VERSION+SUFFIX. Assert the
-          # full tag version is the baked code there. We check the generated source rather than
-          # grepping the exe: an optimized release build constructs the short SSO string via
-          # immediate-mov instructions (e.g. "4.1." as a dword + '2','\0' as byte stores), so the
-          # version never appears as a contiguous run in the binary and a byte-grep is unreliable.
-          if ! grep -qF "\"$ver\"" lib/Version.local.hpp; then
-            echo "::error::lib/Version.local.hpp does not bake code \"$ver\" (baked version mismatch)"
-            cat lib/Version.local.hpp || true
-            exit 1
-          fi
-          echo "OK: $zip produced and lib/Version.local.hpp bakes version $ver"
+          # The zip's existence proves the Makefile derived the right major.minor+suffix (ARCHIVE is
+          # named from VERSION+SUFFIX). Now assert the full tag version is embedded as a CONTIGUOUS
+          # string in both shipped binaries. This is exactly what the runtime needs: the exe's
+          # hook.dll compatibility check (targets/Main.cpp) searches the dll's bytes for the version
+          # string, so a release whose binaries lack a contiguous copy boots as "Incompatible
+          # hook.dll". scripts/make_version embeds LocalVersionCode[] precisely so this holds; grep
+          # here so any regression of that embedding fails CI instead of shipping a broken release.
+          exe="cccaster.v$(echo "$ver" | cut -d. -f1,2).exe"
+          dll="cccaster/hook.dll"
+          for bin in "$exe" "$dll"; do
+            if [ ! -f "$bin" ]; then
+              echo "::error::expected built binary $bin not found"
+              exit 1
+            fi
+            if ! grep -aqF "$ver" "$bin"; then
+              echo "::error::$bin does not embed contiguous version '$ver' (would boot as Incompatible hook.dll)"
+              exit 1
+            fi
+          done
+          echo "OK: $zip / $exe / $dll embed version $ver"
 
       - name: Stage artifact
         run: |
